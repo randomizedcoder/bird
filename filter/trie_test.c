@@ -684,7 +684,8 @@ t_trie_walk(void)
     /* Find a common superprefix to several subsequent prefixes */
     for (; pos < end; pos++)
     {
-      if (net_equal(&from.net, &pxset[pos].net))
+      /* ipX_pxlen() requires distinct addresses, regardless of prefix length */
+      if (ipa_equal(net_prefix(&from.net), net_prefix(&pxset[pos].net)))
 	continue;
 
       int common = !v6 ?
