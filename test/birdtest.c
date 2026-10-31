@@ -28,6 +28,20 @@
 
 #define BACKTRACE_MAX_LINES 100
 
+/*
+ * UBSan only prints a report and lets the program go on by default, so
+ * undefined behaviour would not fail a test. Built with --enable-ubsan,
+ * stop at the first report (UBSAN_OPTIONS can still override this).
+ * Without UBSan, nothing calls this.
+ */
+const char *__ubsan_default_options(void);
+
+const char *
+__ubsan_default_options(void)
+{
+  return "halt_on_error=1:print_stacktrace=1";
+}
+
 #define sprintf_concat(s, format, ...) \
     snprintf(s + strlen(s), sizeof(s) - strlen(s), format, ##__VA_ARGS__)
 
