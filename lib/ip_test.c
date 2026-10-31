@@ -291,6 +291,69 @@ t_ip6_shift_right(void)
   return 1;
 }
 
+struct getbits_vector {
+  uint pos, n;
+  u32 expected;
+};
+
+static int
+t_ip4_getbits(void)
+{
+  ip4_addr a = ip4_from_u32(0x8D0D8BDC);
+  static const struct getbits_vector test_vectors[] = {
+    {  0, 4, 0x8 },
+    {  8, 4, 0x0 },
+    { 24, 8, 0xDC },
+    {  0, 31, 0x4686C5EE },
+    {  1, 31, 0x0D0D8BDC },
+    {  0, 0, 0 },
+    { 17, 0, 0 },
+    { 32, 0, 0 },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(test_vectors); i++)
+  {
+    const struct getbits_vector *v = &test_vectors[i];
+    u32 got = ip4_getbits(a, v->pos, v->n);
+    bt_assert_msg(got == v->expected,
+		  "ip4_getbits(%u, %u) = 0x%x, expected 0x%x",
+		  v->pos, v->n, got, v->expected);
+  }
+
+  return 1;
+}
+
+static int
+t_ip6_getbits(void)
+{
+  ip6_addr a = ip6_build(0x8D0D8BDC, 0x1F04DB92, 0xE5117673, 0x70E54449);
+  static const struct getbits_vector test_vectors[] = {
+    {   0, 4, 0x8 },
+    {  40, 8, 0x04 },
+    { 124, 4, 0x9 },
+    {  31, 1, 0x0 },
+    { 127, 1, 0x1 },
+    {  97, 31, 0x70E54449 },
+    {   0, 0, 0 },
+    {  32, 0, 0 },
+    {  64, 0, 0 },
+    {  96, 0, 0 },
+    { 128, 0, 0 },
+    {  77, 0, 0 },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(test_vectors); i++)
+  {
+    const struct getbits_vector *v = &test_vectors[i];
+    u32 got = ip6_getbits(a, v->pos, v->n);
+    bt_assert_msg(got == v->expected,
+		  "ip6_getbits(%u, %u) = 0x%x, expected 0x%x",
+		  v->pos, v->n, got, v->expected);
+  }
+
+  return 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -304,6 +367,8 @@ main(int argc, char *argv[])
   bt_test_suite(t_ip6_prefix_equal, "Testing ip6_prefix_equal()");
   bt_test_suite(t_ip6_shift_left, "Testing ip6_shift_left()");
   bt_test_suite(t_ip6_shift_right, "Testing ip6_shift_right()");
+  bt_test_suite(t_ip4_getbits, "Testing ip4_getbits()");
+  bt_test_suite(t_ip6_getbits, "Testing ip6_getbits()");
 
   return bt_exit_value();
 }

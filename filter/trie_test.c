@@ -858,6 +858,53 @@ t_trie_walk_to_root(void)
   return 1;
 }
 
+static int
+t_trie_format(void)
+{
+  bt_bird_init();
+  bt_config_parse(BT_CONFIG_SIMPLE);
+
+  /* Host routes and ranges up to them exercise the upper bound; /0 and nearby
+     lengths check the rest */
+  static const struct {
+    int type;
+    const char *prefix;
+    uint max_len;
+    const char *expected;
+  } test_vectors[] = {
+    { NET_IP4, "0.0.0.0/0", 0, "[0.0.0.0/0]" },
+    { NET_IP4, "192.0.2.0/28", 28, "[192.0.2.0/28{0.0.0.16}]" },
+    { NET_IP4, "192.0.2.0/31", 31, "[192.0.2.0/31{0.0.0.2}]" },
+    { NET_IP4, "192.0.2.0/24", 32, "[192.0.2.0/24{0.0.1.255}]" },
+    { NET_IP4, "192.0.2.1/32", 32, "[192.0.2.1/32{0.0.0.1}]" },
+    { NET_IP6, "::/0", 0, "[::/0]" },
+    { NET_IP6, "2001:db8::/124", 124, "[2001:db8::/124{::10}]" },
+    { NET_IP6, "2001:db8::/127", 127, "[2001:db8::/127{::2}]" },
+    { NET_IP6, "2001:db8::/120", 128, "[2001:db8::/120{::1ff}]" },
+    { NET_IP6, "2001:db8::1/128", 128, "[2001:db8::1/128{::1}]" },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(test_vectors); i++)
+  {
+    struct f_trie *trie = f_new_trie(tmp_linpool, 0);
+    net_addr net;
+    bt_read_net(test_vectors[i].prefix, &net, test_vectors[i].type);
+    trie_add_prefix(trie, &net, net.pxlen, test_vectors[i].max_len);
+
+    byte bbuf[TRIE_BUFFER_SIZE];
+    buffer buf = { .start = bbuf, .pos = bbuf, .end = bbuf + sizeof(bbuf) };
+    trie_format(trie, &buf);
+
+    bt_assert_msg(!strcmp((char *) bbuf, test_vectors[i].expected),
+		  "%s: got %s, expected %s", test_vectors[i].prefix,
+		  bbuf, test_vectors[i].expected);
+    tmp_flush();
+  }
+
+  bt_bird_cleanup();
+  return 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -869,6 +916,7 @@ main(int argc, char *argv[])
   bt_test_suite(t_trie_same, "A trie filled forward should be same with a trie filled backward.");
   bt_test_suite(t_trie_walk, "Testing TRIE_WALK() on random tries");
   bt_test_suite(t_trie_walk_to_root, "Testing TRIE_WALK_TO_ROOT() on random tries");
+  bt_test_suite(t_trie_format, "Testing trie_format() at prefix-length boundaries");
 
   // bt_test_suite(t_bench_trie_datasets_subset, "Benchmark tries from datasets by random subset of nets");
   // bt_test_suite(t_bench_trie_datasets_random, "Benchmark tries from datasets by generated addresses");
