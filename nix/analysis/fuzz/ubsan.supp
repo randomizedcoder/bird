@@ -1,0 +1,12 @@
+# UBSan suppressions for run-fuzzers: findings already triaged, so the
+# fuzzers keep looking for new ones instead of stopping on these. Remove
+# an entry once the bug is fixed upstream. Format: <check>:<function|file>.
+# Inlined helpers have to be matched by file: UBSan matches the function
+# name of the outermost (non-inlined) frame.
+#
+# ip6_getbits(a, pos, 0) shifts a u32 by 32 when pos % 32 == 0, and reads
+# a.addr[4] when pos == 128 (filter/trie.c trie_local_mask6(), reached from
+# rt_notify_hostcache() for any IPv6 route whose prefix length is a
+# multiple of 32). The result is masked to 0, so behaviour is unaffected.
+shift-exponent:*/lib/ip.h
+bounds:*/lib/ip.h

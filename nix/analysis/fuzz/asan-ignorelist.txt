@@ -1,0 +1,12 @@
+# Compile-time ASan ignorelist for the fuzz build (fuzz.nix sanCflags).
+# Known, already-triaged out-of-bounds reads that would otherwise stop
+# fuzz_bgp_msg within seconds; ASan cannot suppress these at run time.
+# Remove an entry once the bug is fixed upstream.
+#
+# ip6_getbits()/ip6_getbit() index a.addr[pos / 32], i.e. a.addr[4] for
+# pos >= 128: filter/trie.c trie_local_mask6() (from rt_notify_hostcache()
+# for every IPv6 /128 route) and trie_node_format() (formatting a trie with
+# a /128 node). The UBSan side of the same bug is in ubsan.supp.
+[address]
+fun:ip6_getbits
+fun:ip6_getbit
