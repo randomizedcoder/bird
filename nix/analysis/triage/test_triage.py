@@ -17,7 +17,7 @@ from filters import (  # noqa: E402
     is_test_code, is_third_party,
 )
 from parsers import clang, flawfinder, semgrep  # noqa: E402
-from scoring import find_cross_tool_hits, get_high_confidence  # noqa: E402
+from scoring import find_cross_tool_hits, get_high_confidence, is_hazard_pattern  # noqa: E402
 
 STORE = '/nix/store/' + 'a' * 32 + '-bird-analysis-compile-db/'
 
@@ -166,10 +166,59 @@ class TestScoring(unittest.TestCase):
              'input': [mk(check='someRareThing')], 'expected': 1},
             {'description': 'style-only check excluded',
              'input': [mk(check='variableScope', sev='style')], 'expected': 0},
+            {'description': 'three tools flagging the same alloca are not cross-tool',
+             'input': [mk(check='allocaCalled', sev='warning'),
+                       mk(tool='gcc-warnings', check='-Walloca', sev='warning'),
+                       mk(tool='semgrep', check='alloca-usage', sev='warning')],
+             'expected': 0},
+            {'description': 'hazard lint beside a style finding does not promote it',
+             'input': [mk(tool='gcc-warnings', check='-Wpointer-sign', sev='warning'),
+                       mk(tool='clang-tidy', check='bugprone-foo', sev='style', line=11)],
+             'expected': 0},
+            {'description': 'two semantic tools on one line are still cross-tool',
+             'input': [mk(tool='gcc-warnings', check='-Wnull-dereference', sev='warning'),
+                       mk(tool='clang-tidy', check='bugprone-foo', sev='warning')],
+             'expected': 2},
         ]
         for r in rows:
             with self.subTest(r['description']):
                 self.assertEqual(len(get_high_confidence(r['input'])), r['expected'])
+
+
+    def test_is_hazard_pattern(self):
+        rows = [
+            {'description': 'flawfinder is always lexical',
+             'input': mk(tool='flawfinder', check='buffer.strcpy'), 'expected': True},
+            {'description': 'gcc -Wpointer-sign',
+             'input': mk(tool='gcc-warnings', check='-Wpointer-sign'), 'expected': True},
+            {'description': 'clang-tidy alias list matched per part',
+             'input': mk(tool='clang-tidy',
+                         check='bugprone-unsafe-functions,cert-msc24-c,cert-msc33-c'),
+             'expected': True},
+            {'description': 'insecureAPI prefix (clang-tidy spelling)',
+             'input': mk(tool='clang-tidy',
+                         check='clang-analyzer-security.insecureAPI.strcpy'),
+             'expected': True},
+            {'description': 'insecureAPI prefix (scan-build spelling)',
+             'input': mk(tool='clang-analyzer', check='security.insecureAPI.bzero'),
+             'expected': True},
+            {'description': 'semgrep construct rule',
+             'input': mk(tool='semgrep', check='bsprintf-unbounded'), 'expected': True},
+            {'description': 'semgrep wire-length rule is semantic',
+             'input': mk(tool='semgrep', check='wire-len-to-memcpy-unchecked'),
+             'expected': False},
+            {'description': 'null dereference is semantic',
+             'input': mk(tool='clang-analyzer', check='core.NullDereference'),
+             'expected': False},
+            {'description': 'prefix must match at the start',
+             'input': mk(tool='clang-tidy', check='x-security.insecureAPI.strcpy'),
+             'expected': False},
+            {'description': 'empty check id',
+             'input': mk(tool='cppcheck', check=''), 'expected': False},
+        ]
+        for r in rows:
+            with self.subTest(r['description']):
+                self.assertEqual(is_hazard_pattern(r['input']), r['expected'])
 
 
 class TestParsers(unittest.TestCase):

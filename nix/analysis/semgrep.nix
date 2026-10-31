@@ -7,7 +7,9 @@
 # `semgrep --test` (`ruleid:` lines must match, `ok:` lines must not); a
 # failing fixture or a rule that fails to parse fails the build, since
 # semgrep would otherwise skip the rule with only a JSON "errors" entry.
-# semgrep-report.jq validates the JSON and prints the finding count.
+# semgrep-report.jq validates the JSON and prints the finding count. A rule
+# timeout fails it (that file went unscanned), so --timeout is generous: the
+# 5 s default trips on proto/bgp/packets.c on a loaded machine.
 {
   pkgs,
   mkSourceReport,
@@ -65,6 +67,7 @@ let
         --no-git-ignore \
         --jobs "$(nproc)" \
         --max-target-bytes 4000000 \
+        --timeout 120 \
         "''${dirs[@]}" \
         > "$output_dir/report.json" 2> "$output_dir/scan-errors.txt" || {
           cat "$output_dir/scan-errors.txt" >&2

@@ -52,7 +52,10 @@ The aggregates also contain `triage/`. Its `high-confidence.txt` lists
 findings that more than one tool flagged, or that a high-signal checker
 flagged. It weights findings in security-relevant code higher. That means
 the protocol packet parsers, BGP attributes and NLRI, flowspec, RPKI,
-netlink and the CLI socket.
+netlink and the CLI socket. API-usage lints (flawfinder, alloca, strcpy,
+bzero, `-Wpointer-sign`, the semgrep construct rules) only flag a construct.
+They appear in `full-report.txt` but never in `high-confidence.txt`, and
+several tools flagging the same construct don't count as cross-tool.
 
 ## Module map
 

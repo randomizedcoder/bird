@@ -60,6 +60,48 @@ STYLE_ONLY_CHECKS = {
     'bugprone-signed-char-misuse',      # Sign extension is intentional for error codes
 }
 
+# API-usage lints: they flag a construct (alloca, strcpy, bzero, sprintf,
+# signedness), not a defect, and several tools flag the same construct. They
+# stay in the full report but never count as high confidence and never make a
+# location cross-tool: 3 tools all saying "alloca here" is not 3 votes.
+HAZARD_PATTERN_TOOLS = {'flawfinder'}   # purely lexical
+
+HAZARD_PATTERN_CHECKS = {
+    # gcc-warnings
+    '-Wpointer-sign', '-Walloca', '-Wvla', '-Wparentheses', '-Wcast-align',
+    '-Wshadow=local', '-Wshadow=compatible-local',
+    # cppcheck
+    'allocaCalled', 'bzeroCalled', 'funcArgNamesDifferentUnnamed',
+    'unreadVariable',
+    # clang-tidy
+    'bugprone-unsafe-functions',
+    'bugprone-multi-level-implicit-pointer-conversion',
+    'bugprone-switch-missing-default-case',
+    # BIRD semgrep rules that flag a construct, not a missing check
+    'bsprintf-unbounded', 'unsafe-sprintf', 'unsafe-strcpy-strcat',
+    'strncpy-usage', 'alloca-usage', 'atoi-usage',
+}
+
+HAZARD_PATTERN_PREFIXES = (
+    'clang-analyzer-security.insecureAPI.',
+    'security.insecureAPI.',
+)
+
+
+def is_hazard_pattern(f) -> bool:
+    """True for API-usage lints (see HAZARD_PATTERN_CHECKS).
+
+    clang-tidy joins aliased checks with commas
+    ("bugprone-unsafe-functions,cert-msc24-c"), so each part is tested.
+    """
+    if f.tool in HAZARD_PATTERN_TOOLS:
+        return True
+    for part in f.check_id.split(','):
+        if part in HAZARD_PATTERN_CHECKS or part.startswith(HAZARD_PATTERN_PREFIXES):
+            return True
+    return False
+
+
 # Prefixes excluded from high-confidence output
 _HIGH_CONF_EXCLUDED_PREFIXES = (
     'readability-',
@@ -152,9 +194,10 @@ def get_high_confidence(findings: list) -> list:
     for f in findings:
         cat_counts[f.check_id] += 1
 
-    # Find cross-tool correlations (excluding flawfinder noise)
-    non_noise = [f for f in findings if f.check_id not in FLAWFINDER_NOISE]
-    cross_hits = find_cross_tool_hits(non_noise)
+    # Find cross-tool correlations among findings that point at a defect
+    semantic = [f for f in findings
+                if f.check_id not in FLAWFINDER_NOISE and not is_hazard_pattern(f)]
+    cross_hits = find_cross_tool_hits(semantic)
     cross_locations = set()
     for cluster in cross_hits:
         for f in cluster:
@@ -164,6 +207,8 @@ def get_high_confidence(findings: list) -> list:
     for f in findings:
         # Skip noise categories entirely from high-confidence
         if f.check_id in FLAWFINDER_NOISE or f.check_id in STYLE_ONLY_CHECKS:
+            continue
+        if is_hazard_pattern(f):
             continue
         # Skip excluded prefixes (style, not bugs)
         if any(f.check_id.startswith(p) for p in _HIGH_CONF_EXCLUDED_PREFIXES):
