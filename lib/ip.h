@@ -327,14 +327,16 @@ static inline int ip6_prefix_equal(ip6_addr a, ip6_addr b, uint n)
 static inline u32 ip4_getbit(ip4_addr a, uint pos)
 { return (_I(a) >> (31 - pos)) & 1; }
 
+/* ipX_getbits() return n < 32 bits starting at bit pos; for ip6 they must lie
+   within one 32-bit word. n == 0 yields 0 for any pos up to the address length */
 static inline u32 ip4_getbits(ip4_addr a, uint pos, uint n)
-{ return (_I(a) >> ((32 - n) - pos)) & ((1u << n) - 1); }
+{ return n ? (_I(a) >> ((32 - n) - pos)) & ((1u << n) - 1) : 0; }
 
 static inline u32 ip6_getbit(ip6_addr a, uint pos)
 { return (a.addr[pos / 32] >> (31 - (pos % 32))) & 0x1; }
 
 static inline u32 ip6_getbits(ip6_addr a, uint pos, uint n)
-{ return (a.addr[pos / 32] >> ((32 - n) - (pos % 32))) & ((1u << n) - 1); }
+{ return n ? (a.addr[pos / 32] >> ((32 - n) - (pos % 32))) & ((1u << n) - 1) : 0; }
 
 static inline u32 ip4_setbit(ip4_addr *a, uint pos)
 { return _I(*a) |= (0x80000000 >> pos); }
