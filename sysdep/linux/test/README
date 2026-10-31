@@ -1,0 +1,29 @@
+Netlink captures used by sysdep/linux/netlink_test.c
+====================================================
+
+Each file is a pcap (link type 253, LINKTYPE_NETLINK) of one iproute2
+command, captured on an nlmon interface. Every packet holds one or more
+netlink messages: the request from ip(8) and the kernel's replies. The
+test skips the requests (NLM_F_REQUEST) and parses the replies.
+
+The captures come from the xtcp2 project, commit ae7b8bcb
+(https://github.com/randomizedcoder/xtcp2, pkg/xtcpnl/testdata/7_3_0/dumps/),
+recorded in a test VM running Linux 7.3.0 with iproute2 7.2.0. They use
+documentation addresses only (RFC 5737, RFC 3849, RFC 2544).
+
+  link-dump.pcap    netlink_route_getlink.pcap, "ip link show"
+
+The VM had these interfaces:
+
+  1 lo        loopback, mtu 65536
+  2 nlmon0    nlmon, mtu 3776
+  3 goip0     dummy, mtu 1500, 5e:9c:8f:0b:ce:ae
+                192.0.2.1/24, 2001:db8::1/64, 2001:db8::9/64
+  4 goipvrf   vrf (table 100), mtu 65575, 4a:53:32:ed:29:e2
+  5 goipv     dummy, master goipvrf, mtu 1500, 86:da:71:5c:b3:da
+                198.18.11.1/24
+
+Netlink messages are in host byte order, so the tests of the captures
+are skipped on big-endian hosts.
+
+To look at a capture: tshark -r link-dump.pcap -V
