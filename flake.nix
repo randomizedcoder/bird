@@ -104,14 +104,28 @@
           analysis-valgrind = analysis.valgrind;
 
           # Fuzzing.
-          fuzz = analysis.fuzzers; # harnesses + corpora + run-fuzzers
+          fuzz = analysis.fuzzers; # harnesses + corpora + run-fuzzers + fuzz-campaign
           inherit (analysis) fuzz-run; # bounded sandboxed run, collect crashes
+          inherit (analysis) fuzz-coverage; # llvm-cov build + fuzz-coverage report
         }
         // shellCommands.packages;
 
         checks = checks // {
           inherit bird;
           inherit (analysis) fuzz-replay triage-tests;
+        };
+
+        # nix run .#fuzz-campaign -- --hours 12   (long, resumable fuzzing)
+        # nix run .#fuzz-coverage -- ~/bird-fuzz  (what the corpus reaches)
+        apps = {
+          fuzz-campaign = {
+            type = "app";
+            program = "${analysis.fuzzers}/bin/fuzz-campaign";
+          };
+          fuzz-coverage = {
+            type = "app";
+            program = "${analysis.fuzz-coverage}/bin/fuzz-coverage";
+          };
         };
 
         devShells.default = devshell;

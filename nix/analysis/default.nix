@@ -157,5 +157,10 @@ in
     ;
   inherit (gccTargets) gcc-warnings gcc-analyzer;
   inherit (sanitizerTargets) sanitizers thread-sanitizer;
-  inherit (fuzzTargets) fuzzers fuzz-run fuzz-replay;
+  inherit (fuzzTargets)
+    fuzzers
+    fuzz-run
+    fuzz-replay
+    fuzz-coverage
+    ;
 }

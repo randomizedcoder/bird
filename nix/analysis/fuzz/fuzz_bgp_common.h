@@ -4,10 +4,8 @@
  *	The real configuration and startup path runs: the config below is
  *	parsed and committed, each protocol takes its object lock, waits out
  *	its connect delay and calls sk_open() on an active TCP socket. Only
- *	the socket layer is stubbed, with -Wl,--wrap (fuzz.mk):
- *
- *	  sk_open()   allocates the buffers, opens no descriptor
- *	  sk_send()   reports the data as sent
+ *	the socket layer is stubbed (fuzz_sock.h): sk_open() allocates the
+ *	buffers and opens no descriptor, sk_send() reports the data as sent.
  *
  *	fuzz_bgp_connect() then fires the socket's tx_hook (bgp_connected:
  *	send OPEN, enter OpenSent), and fuzz_bgp_establish() feeds a peer
@@ -28,14 +26,11 @@
 #ifndef _BIRD_NIX_FUZZ_BGP_COMMON_H_
 #define _BIRD_NIX_FUZZ_BGP_COMMON_H_
 
-#include "fuzz_bird.h"
+#include "fuzz_sock.h"
 
 #include "nest/protocol.h"
-#include "lib/socket.h"
 #include "nest/attrs.h"
 #include "proto/bgp/bgp.h"
-
-extern list proto_list;
 
 /*
  * Two sessions: eBGP (65000 <-> 65001) and iBGP (65000, peer is a route
@@ -103,32 +98,6 @@ static const u16 fuzz_bgp_afs[][2] = {
   { BGP_AFI_L2VPN, BGP_SAFI_EVPN },
 };
 #define FUZZ_BGP_AF_COUNT (sizeof(fuzz_bgp_afs) / sizeof(fuzz_bgp_afs[0]))
-
-/* ── Socket layer stubs ─────────────────────────────────────────────── */
-
-int __real_sk_open(sock *s);
-int __wrap_sk_open(sock *s);
-int __wrap_sk_send(sock *s, uint len);
-
-int
-__wrap_sk_open(sock *s)
-{
-  if (!s->rbuf && s->rbsize)
-    s->rbuf = s->rbuf_alloc = xmalloc(s->rbsize);
-  s->rpos = s->rbuf;
-  if (!s->tbuf && s->tbsize)
-    s->tbuf = s->tbuf_alloc = xmalloc(s->tbsize);
-  s->tpos = s->ttx = s->tbuf;
-  s->fd = -1;
-  return 0;
-}
-
-int
-__wrap_sk_send(sock *s, uint len UNUSED)
-{
-  s->ttx = s->tpos = s->tbuf;
-  return 1;
-}
 
 /* ── Session-preserving error paths ─────────────────────────────────── */
 
@@ -275,15 +244,7 @@ fuzz_bgp_build_open(byte *buf, u32 asn, u32 id)
 static void
 fuzz_bgp_feed(struct bgp_conn *conn, const byte *data, uint len)
 {
-  sock *sk = conn->sk;
-
-  if (len > sk->rbsize)
-    len = sk->rbsize;
-  memcpy(sk->rbuf, data, len);
-  sk->rpos = sk->rbuf + len;
-  if (sk->rx_hook)
-    sk->rx_hook(sk, len);
-  sk->rpos = sk->rbuf;
+  fuzz_sk_feed(conn->sk, data, len, NULL);
 }
 
 /* ── Session bring-up ───────────────────────────────────────────────── */
@@ -291,14 +252,7 @@ fuzz_bgp_feed(struct bgp_conn *conn, const byte *data, uint len)
 static struct bgp_proto *
 fuzz_bgp_find(const char *name)
 {
-  struct proto *p;
-
-  WALK_LIST(p, proto_list)
-    if ((p->proto == &proto_bgp) && !strcmp(p->name, name))
-      return (struct bgp_proto *) p;
-
-  fprintf(stderr, "fuzz: BGP protocol %s not found\n", name);
-  abort();
+  return (struct bgp_proto *) fuzz_proto_find(&proto_bgp, name);
 }
 
 /* Run the connect timer and the TCP-connected hook: OPEN sent, OpenSent. */

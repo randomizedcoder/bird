@@ -18,6 +18,8 @@ nix build .#analysis-quick  && cat result/summary.txt   # clang-tidy + cppcheck
 nix build .#analysis-deep   && cat result/summary.txt   # every static tool
 nix build .#analysis-sanitizers                         # make check under ASan+UBSan
 nix build .#fuzz && FUZZ_TIME=600 ./result/bin/run-fuzzers
+nix run .#fuzz-campaign -- --hours 12               # long, resumable fuzzing
+nix run .#fuzz-coverage -- ~/bird-fuzz              # source coverage of a corpus
 
 nix flake check                     # nix-fmt, deadnix, statix, bird, triage tests, fuzz replay
 nix fmt                             # format the Nix files
@@ -36,8 +38,10 @@ nix fmt                             # format the Nix files
 | `analysis-sanitizers` | ASan, LSan and UBSan build (BIRD's `--enable-asan --enable-ubsan`), running `make check`. |
 | `analysis-tsan` | TSan build (clang, `--enable-tsan`), running `make check`. |
 | `analysis-valgrind` | Each unit test under valgrind memcheck (`-f`, no fork). |
-| `fuzz` | libFuzzer harnesses, seed corpora and `bin/run-fuzzers` (see `analysis/fuzz/README.md`). |
+| `fuzz` | libFuzzer harnesses (BGP, OSPF, Babel, RIP, BFD, RPKI, netlink, CLI, config, flowspec), seed corpora, `bin/run-fuzzers` and `bin/fuzz-campaign` (see `analysis/fuzz/README.md`). |
 | `fuzz-run` | Runs each harness for 20 s in the sandbox and collects crashes and reproductions. |
+| `fuzz-coverage` | Source-coverage build of the replay binaries and `bin/fuzz-coverage` (llvm-cov report of a corpus). |
+| apps `fuzz-campaign`, `fuzz-coverage` | `nix run` entry points for the two scripts above. |
 | `bird-configure`, `bird-build`, `bird-check`, `bird-compdb`, `bird-help` | Dev-shell helper commands. |
 
 Each analysis output contains:
@@ -81,8 +85,9 @@ nix/
     gcc.nix               gcc-warnings, gcc-analyzer
     sanitizers.nix        ASan+UBSan, TSan make-check runs
     valgrind.nix          memcheck over every unit test
-    fuzz.nix              fuzzers, fuzz-run, fuzz-replay
-    fuzz/                 harness sources, fuzz.mk, seed generator, known-bug suppressions
+    fuzz.nix              fuzzers, fuzz-run, fuzz-replay, fuzz-coverage, campaign wiring
+    fuzz/                 harness sources, fuzz.mk, seed generator, campaign / coverage
+                          scripts, known-bug suppressions
     triage/               finding parser/scorer (+ test_triage.py)
 ```
 
@@ -100,5 +105,6 @@ nix/
   `/dev/null`. Sanitizer reports therefore go to per-process `log_path`
   files, and the pass/fail list comes from the `<test>.ok` stamps.
 - **Known-bug suppressions** for fuzzing live in `analysis/fuzz/ubsan.supp`
-  and `analysis/fuzz/asan-ignorelist.txt`. Each entry names the bug it
-  hides. Drop the entry once that bug is fixed.
+  and `analysis/fuzz/asan-ignorelist.txt`, or as skips in a harness. Each
+  entry names the bug it hides, and `analysis/fuzz/README.md` lists them.
+  Drop the entry once that bug is fixed.

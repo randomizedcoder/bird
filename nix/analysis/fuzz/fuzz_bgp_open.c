@@ -23,11 +23,7 @@ static byte fuzz_buf[BGP_RX_BUFFER_SIZE];
 static void
 fuzz_setup(void)
 {
-  char *cfg = malloc(strlen(fuzz_log_config()) + sizeof(FUZZ_BGP_CONFIG));
-
-  strcpy(cfg, fuzz_log_config());
-  strcat(cfg, FUZZ_BGP_CONFIG);
-  fuzz_bird_init(cfg);
+  fuzz_bird_init(FUZZ_BGP_CONFIG);
 
   fuzz_p = fuzz_bgp_find("peer_e");
   fuzz_conn = fuzz_bgp_connect(fuzz_p);

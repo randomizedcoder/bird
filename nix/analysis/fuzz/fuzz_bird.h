@@ -21,7 +21,9 @@
 
 #include "nest/bird.h"
 #include "lib/event.h"
+#include "lib/timer.h"
 #include "conf/conf.h"
+#include "nest/protocol.h"
 #include "sysdep/unix/unix.h"
 
 #include "fuzz_harness.h"
@@ -61,6 +63,48 @@ __wrap_sysdep_preconfig(struct config *c)
   c->watchdog_warning = UNIX_DEFAULT_WATCHDOG_WARNING;
 }
 
+/* Virtual clock: fuzz.mk links every harness with --wrap=times_update, so
+ * BIRD's notion of now (current_time(), timer expiry) only moves when a
+ * harness calls fuzz_advance(). Inputs replay deterministically, and the
+ * harnesses can still reach timer-driven code (hold / dead / retransmit
+ * timers, LSA aging, SPF scheduling, rate limits) by advancing it. */
+struct timeloop;
+void __wrap_times_update(struct timeloop *loop);
+
+static btime fuzz_clock;
+
+void
+__wrap_times_update(struct timeloop *loop)
+{
+  if (fuzz_clock < loop->last_time)
+    fuzz_clock = loop->last_time;
+
+  loop->last_time = fuzz_clock;
+  loop->real_time = 0;
+}
+
+static inline void fuzz_pump(void);
+
+/* Move the clock forward by dt, then run the timers that are due and the
+ * events they queue, as one main loop iteration would. */
+static inline void
+fuzz_advance(btime dt)
+{
+  if (fuzz_clock < main_timeloop.last_time)
+    fuzz_clock = main_timeloop.last_time;
+
+  fuzz_clock += dt;
+  timers_fire(&main_timeloop);
+  fuzz_pump();
+}
+
+/* fuzz_advance() by an input byte: 0.1 s to 25.6 s. */
+static inline void
+fuzz_advance_byte(uint8_t b)
+{
+  fuzz_advance((b + 1) * 100 MS);
+}
+
 /* Run queued events (protocol state changes, table pruning, TX kicks) until
  * the queues drain or a bound is hit; events may reschedule themselves. */
 static inline void
@@ -75,7 +119,37 @@ fuzz_pump(void)
   }
 }
 
-/* bt_init + bt_bird_init, then parse and commit `cfg` (if non-NULL). */
+/* The configured instance `name` of protocol `pr`; aborts if missing. */
+extern list proto_list;
+
+/* Files: fuzz.mk links every harness with --wrap=rf_open, so whatever file
+ * an input names in `log "..."`, `mrtdump "..."` or an MRT dump, nothing
+ * is created; the file is /dev/null. */
+struct rfile;
+struct rfile *__real_rf_open(struct pool *p, const char *name, const char *mode);
+struct rfile *__wrap_rf_open(struct pool *p, const char *name, const char *mode);
+
+struct rfile *
+__wrap_rf_open(struct pool *p, const char *name UNUSED, const char *mode)
+{
+  return __real_rf_open(p, "/dev/null", mode);
+}
+
+static inline struct proto *
+fuzz_proto_find(struct protocol *pr, const char *name)
+{
+  struct proto *p;
+
+  WALK_LIST(p, proto_list)
+    if ((p->proto == pr) && !strcmp(p->name, name))
+      return p;
+
+  fprintf(stderr, "fuzz: protocol %s not found\n", name);
+  abort();
+}
+
+/* bt_init + bt_bird_init, then parse and commit `cfg` (if non-NULL),
+ * prefixed with fuzz_log_config(). */
 static inline void
 fuzz_bird_init(const char *cfg)
 {
@@ -92,7 +166,12 @@ fuzz_bird_init(const char *cfg)
 
   if (cfg)
   {
-    if (!bt_config_parse(cfg))
+    const char *log = fuzz_log_config();
+    char *full = malloc(strlen(log) + strlen(cfg) + 1);
+
+    strcpy(full, log);
+    strcat(full, cfg);
+    if (!bt_config_parse(full))
     {
       fprintf(stderr, "fuzz: harness configuration failed to parse\n");
       abort();
