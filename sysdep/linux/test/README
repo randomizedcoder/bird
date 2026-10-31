@@ -12,6 +12,7 @@ recorded in a test VM running Linux 7.3.0 with iproute2 7.2.0. They use
 documentation addresses only (RFC 5737, RFC 3849, RFC 2544).
 
   link-dump.pcap    netlink_route_getlink.pcap, "ip link show"
+  addr-dump.pcap    netlink_route_getaddr.pcap, "ip addr show"
 
 The VM had these interfaces:
 
