@@ -426,6 +426,10 @@ static const byte nl_test_kind_vrf[] = {
   /* IFLA_INFO_KIND "vrf" */
   8, 0, IFLA_INFO_KIND, 0, 'v', 'r', 'f', 0,
 };
+static const byte nl_test_kind_vrf_no_nul[] = {
+  /* IFLA_INFO_KIND "vrf" without its NUL, the last byte is padding */
+  7, 0, IFLA_INFO_KIND, 0, 'v', 'r', 'f', 0,
+};
 
 /* Changed copies of goip0's message, each under a new index */
 static int
@@ -447,6 +451,14 @@ t_parse_link_changed(void)
       0, "abcdefghijklmno index %u mtu 1500 admin-up link-up multiaccess broadcast multicast lladdr 5e:9c:8f:0b:ce:ae" },
     { "empty name is rejected (negative)", { IFLA_IFNAME, 1, "" },
       0, "none" },
+    { "name without a NUL is rejected (negative)", { IFLA_IFNAME, 4, "eth1" },
+      0, "none" },
+    { "name with its NUL only in the padding is rejected (corner)", { IFLA_IFNAME, 3, "abc" },
+      0, "none" },
+    { "15 character name without a NUL is rejected (boundary)", { IFLA_IFNAME, 15, nl_test_name15 },
+      0, "none" },
+    { "name ends at its first NUL (corner)", { IFLA_IFNAME, 4, "ab\0c" },
+      0, "ab index %u mtu 1500 admin-up link-up multiaccess broadcast multicast lladdr 5e:9c:8f:0b:ce:ae" },
     { "no name is rejected (negative)", { IFLA_IFNAME, NL_TEST_DROP },
       0, "none" },
     { "no MTU is rejected (negative)", { IFLA_MTU, NL_TEST_DROP },
@@ -463,6 +475,8 @@ t_parse_link_changed(void)
       0, "goip0 index %u mtu 1500 admin-up link-up multiaccess broadcast multicast lladdr 5e:9c:8f:0b:ce:ae" },
     { "link kind vrf (positive)", { IFLA_LINKINFO, sizeof(nl_test_kind_vrf), nl_test_kind_vrf },
       0, "goip0 index %u mtu 1500 admin-up link-up multiaccess broadcast multicast vrf lladdr 5e:9c:8f:0b:ce:ae" },
+    { "link kind without a NUL is ignored (negative)", { IFLA_LINKINFO, sizeof(nl_test_kind_vrf_no_nul), nl_test_kind_vrf_no_nul },
+      0, "goip0 index %u mtu 1500 admin-up link-up multiaccess broadcast multicast lladdr 5e:9c:8f:0b:ce:ae" },
     { "message one byte shorter than struct ifinfomsg (negative)", {},
       NLMSG_LENGTH(sizeof(struct ifinfomsg)) - 1, "none" },
     { "message with struct ifinfomsg and no attributes (boundary)", {},
