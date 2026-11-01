@@ -64,6 +64,7 @@ int filter_same(const struct filter *new, const struct filter *old);
 int f_same(const struct f_line *f1, const struct f_line *f2);
 
 void filter_commit(struct config *new, struct config *old);
+void f_parse_init(void);
 
 void filters_dump_all(struct dump_request *);
 
