@@ -16,6 +16,9 @@
 #define NOT_FUNCTION "Can't return from a non-function, use accept or reject instead."
 #define METHOD_FAIL "filter f { int i; i = 1; if i.len = 1 then accept; reject; }\n"
 #define METHOD_EVAL "eval (1).len"
+#define KEYWORD_FUNCTION "function recursive() -> int { return 1; }\n"
+#define ROUTE4_RECURSIVE "protocol static { ipv4; route 198.51.100.0/24 recursive 192.0.2.1; }\n"
+#define ROUTE6_RECURSIVE "protocol static { ipv6; route 2001:db8::/48 recursive 2001:db8:1::1; }\n"
 #define METHOD_CALL "filter g { bgppath p; p = +empty+; if p.len = 0 then accept; reject; }\n"
 
 static const char *parse_pos;
@@ -104,6 +107,22 @@ t_parse_state(void)
       ROUTE6_RETURN, NOT_FUNCTION },
     { "function after a config failing in a function's header (positive)", "function f(int a, ) { }\n", 0, 1,
       "function f() -> int { return 1; }\n", NULL },
+
+    /* Functions named like a keyword */
+    { "the keyword in a static route, IPv4 (positive)", NULL, 0, 0,
+      ROUTE4_RECURSIVE, NULL },
+    { "the keyword in a static route, IPv6 (positive)", NULL, 0, 0,
+      ROUTE6_RECURSIVE, NULL },
+    { "function named like a keyword (positive)", NULL, 0, 0,
+      KEYWORD_FUNCTION, NULL },
+    { "the keyword after the function in the same config is the function (corner)", NULL, 0, 0,
+      KEYWORD_FUNCTION ROUTE4_RECURSIVE, "syntax error, unexpected CF_SYM_KNOWN" },
+    { "the keyword after a config with the function, IPv4 (positive)", KEYWORD_FUNCTION, 0, 1,
+      ROUTE4_RECURSIVE, NULL },
+    { "the keyword after a config with the function, IPv6 (positive)", KEYWORD_FUNCTION, 0, 1,
+      ROUTE6_RECURSIVE, NULL },
+    { "the keyword after 3 configs with the function (corner)", KEYWORD_FUNCTION, 0, 3,
+      ROUTE4_RECURSIVE, NULL },
 
     /* Method calls */
     { "method call (positive)", NULL, 0, 0,
