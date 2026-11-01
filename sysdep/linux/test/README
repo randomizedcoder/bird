@@ -102,6 +102,26 @@ The ws rows read back no links or addresses, so the test loads those of
 brmpls/route_encap_show, whose d0 is index 3 too, with d0's addresses
 changed in memory to 192.0.2.10/24 and 2001:db8:1::10/64.
 
+route4/rn1-026 comes from xtcp2 commit bb0a1c34 as well. Later commits
+added more ws matrices, laid out the same way:
+
+  addr4/<row>/, addr6/<row>/  "ip address" commands, commit ea40b427;
+                              their netlink_route_dump.pcap is the
+                              "ip addr show" readback (links and addresses)
+  routeget4/<row>/, routeget6/<row>/
+                              "ip route get", commit 75fedde8
+  fibt/<row>/, fibnh/<row>/   commands of the kernel's fib_tests.sh and
+                              fib_nexthops.sh selftests, commit c8154e4b;
+                              these use the selftests' devices (dummy0 4,
+                              dummy1 5, veth1, veth3) and addresses, some
+                              outside the documentation ranges
+
+The route get and fibt captures hold only the command's ip.pcap. ip asks
+there for the links' names only, so their link messages carry IFLA_IFNAME
+and no IFLA_MTU; the test adds an MTU of 1500 before parsing them. The
+fibt rows have no readback of addresses, so BIRD finds the gateways of
+fib_down_test-011 and -012 on no connected network.
+
 kinds/<kind>/<row>/netlink_route_getlink_detail.pcap are "ip -d link
 show" after "ip link add ... type <kind>", from xtcp2's link-write kinds
 corpus, commit b06f338c (link-write/kinds/), same kernel: VXLAN (vx0), GRE

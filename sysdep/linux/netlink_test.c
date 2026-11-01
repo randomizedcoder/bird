@@ -1097,13 +1097,17 @@ t_parse_addr_changed(void)
  * links, then ran "ip addr show", whose dump has the links and addresses.
  * The links are parsed, then the addresses, then all is deleted again, in
  * reverse, for the next row's links of the same names.
+ *
+ * The rows under ws/ are of xtcp2's ip address matrix: one "ip address"
+ * command on a dummy d0 (3, addrgenmode none), then "ip address show dev
+ * d0", whose dump (netlink_route_dump.pcap) has d0 and its addresses.
  */
 static int
 t_parse_addr_show(void)
 {
   static const struct {
     const char *description;
-    const char *row;		/* addr-show row, see README */
+    const char *row;		/* addr-show or ws row, see README */
     const char *name;
     const char *expected;
   } cases[] = {
@@ -1153,6 +1157,10 @@ t_parse_addr_show(void)
       "mixed_links", "d3", "203.0.113.1 net 203.0.113.0/24 brd 203.0.113.255 scope univ primary" },
     { "mixed_links: bond0 without addresses",
       "mixed_links", "bond0", "none" },
+    { "ws/addr4/bd-003: 192.0.2.1/0 scope 255 (nowhere) preferred_lft 0, a /0 kept and its scope taken from the address (boundary)",
+      "ws/addr4/bd-003", "d0", "192.0.2.1 net 0.0.0.0/0 brd 255.255.255.255 scope univ primary" },
+    { "ws/addr4/ec-002: 192.0.2.1 peer 198.51.100.1/32 broadcast 192.0.2.255 scope link noprefixroute, scope taken from the address (corner)",
+      "ws/addr4/ec-002", "d0", "192.0.2.1 net 198.51.100.1/32 brd 198.51.100.1 opposite 198.51.100.1 scope univ primary peer" },
 
     /* IPv6 */
     { "v6_flags: nodad, home, mngtmpaddr noprefixroute and a /48 (positive)",
@@ -1177,6 +1185,8 @@ t_parse_addr_show(void)
       "v6_optimistic", "v1", "none" },
     { "v6_dadfailed: dadfailed tentative and a tentative link-local address, ignored (negative)",
       "v6_dadfailed", "v0", "none" },
+    { "ws/addr6/bd-002: 2001:db8:1::1/0 metric 4294967295 proto 255, a /0 kept (boundary)",
+      "ws/addr6/bd-002", "d0", "2001:db8:1::1 net ::/0 scope univ primary" },
   };
 
   nl_test_kif_init();
@@ -1186,7 +1196,10 @@ t_parse_addr_show(void)
     struct nl_test_capture c;
     char name[128];
 
-    bsnprintf(name, sizeof(name), "addr-show/%s/netlink_route_getaddr.pcap", cases[i].row);
+    if (!strncmp(cases[i].row, "ws/", 3))
+      bsnprintf(name, sizeof(name), "%s/netlink_route_dump.pcap", cases[i].row);
+    else
+      bsnprintf(name, sizeof(name), "addr-show/%s/netlink_route_getaddr.pcap", cases[i].row);
     nl_test_load(&c, name);
 
     for (uint j = 0; j < c.count; j++)
@@ -2371,6 +2384,9 @@ t_parse_route_matrix(void)
     { "route4/ec-009 positive: throw 198.51.100.0/24 nhid 10 via 192.0.2.1 dev d0: throw, skipped",
       "route4/ec-009", "table 254 198.51.100.0/24",
       "none" },
+    { "route4/rn1-026 corner: 198.51.100.0/24 via 203.0.113.1 dev d0 onlink table 4294967295 proto 255 metric 4294967295 src 192.0.2.10 mtu 1280",
+      "route4/rn1-026", "table 4294967295 198.51.100.0/24",
+      "k4m scan 198.51.100.0/24 alien proto 255 metric 4294967295 unicast via 203.0.113.1 dev d0 onlink prefsrc 192.0.2.10 mtu 1280" },
     { "route4/ec-010 positive: 198.51.100.0/24 via inet6 2001:db8:1::1 dev d0",
       "route4/ec-010", "table 254 198.51.100.0/24",
       "k4 scan 198.51.100.0/24 alien proto 3 metric 0 unicast via 2001:db8:1::1 dev d0" },
@@ -2546,6 +2562,86 @@ t_parse_route_matrix(void)
 }
 
 /*
+ * The kernel's answers to "ip route get" in xtcp2's ws rows (see README),
+ * from each row's ip.pcap: the route, and the links ip asked for to print
+ * it. A lookup answers with a clone of the route (RTM_F_CLONED), which
+ * BIRD ignores; with fibmatch, with the FIB entry itself. ip asks for the
+ * links' names only, so the kernel's link messages have their header (its
+ * flags) and IFLA_IFNAME, which BIRD takes as malformed. The test adds an
+ * IFLA_MTU of 1500 to each, parses them first, and deletes them again
+ * afterwards.
+ */
+static int
+t_parse_route_get(void)
+{
+  static const struct {
+    const char *description;
+    const char *row;		/* ws row, see README */
+    const char *key;		/* See nl_test_route_key() */
+    const char *expected;
+    const char *name;		/* A link to check, or NULL */
+    const char *link;
+  } cases[] = {
+    { "routeget4/pw-003 negative: ip -4 route get 198.51.100.7 from 192.0.2.10 mark 4294967295 ipproto icmp sport 1234 dport 443 tos 0x10 notify: a clone, ignored",
+      "routeget4/pw-003", "table 254 198.51.100.7/32", "none" },
+    { "routeget6/bd-001 negative: ip -6 route get 2001:db8:1::5/128 mark 0 uid 0 dport 65535 flowlabel 0xfffff: a clone, ignored",
+      "routeget6/bd-001", "table 254 2001:db8:1::5/128", "none" },
+    { "fibt/fib_carrier_test-017 positive: ip route get fibmatch 198.51.100.2: 198.51.100.0/24 dev dummy0 proto kernel scope link src 198.51.100.1, dummy0 up without carrier",
+      "fibt/fib_carrier_test-017", "table 254 198.51.100.0/24",
+      "k4 scan 198.51.100.0/24 kernel proto 2 metric 0 unicast dev dummy0 scope 253 prefsrc 198.51.100.1",
+      "dummy0", "dummy0 index 4 mtu 1500 admin-up multiaccess broadcast multicast" },
+    { "fibt/fib_down_test-011 corner: ip route get fibmatch 203.0.113.1 oif dummy1: nexthop via 198.51.100.2 dev dummy0 dead linkdown, nexthop via 192.0.2.2 dev dummy1; the links have no addresses here, so the next hops are strange",
+      "fibt/fib_down_test-011", "table 254 203.0.113.0/24", "none",
+      "dummy0", "dummy0 index 4 mtu 1500 multiaccess broadcast multicast" },
+    { "fibt/fib_down_test-012 corner: ip -6 route get fibmatch 2001:db8:3::1 oif dummy1: nexthop via 2001:db8:2::2 dev dummy1, nexthop via 2001:db8:1::2 dev dummy0 dead linkdown; strange next hops, as above",
+      "fibt/fib_down_test-012", "table 254 2001:db8:3::/64", "none" },
+    { "fibt/ipv4_route_test-083 negative: ip route get fibmatch 172.16.102.1 dsfield 0x10: 172.16.102.0/24 tos 0x10 via 172.16.103.2 dev veth3, TOS skipped",
+      "fibt/ipv4_route_test-083", "table 254 172.16.102.0/24", "none" },
+  };
+
+  static const u32 mtu1500 = 1500;
+  struct nl_test_attr mtu = { IFLA_MTU, sizeof(mtu1500), &mtu1500 };
+
+  bt_assert_msg(bt_config_parse(NL_TEST_WS_CONFIG), "Route get config");
+  nl_test_pump();
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture c;
+    char name[128];
+
+    bsnprintf(name, sizeof(name), NL_TEST_WS "%s/ip.pcap", cases[i].row);
+    nl_test_load(&c, name);
+
+    struct nlmsghdr *links[8];
+    uint n = 0;
+    for (uint j = 0; j < c.count; j++)
+      if ((c.msg[j]->nlmsg_type == RTM_NEWLINK) && (n < ARRAY_SIZE(links)))
+      {
+	links[n] = nl_test_copy(c.msg[j], sizeof(struct ifinfomsg), &mtu);
+	nl_parse_link(links[n++], 0);
+      }
+
+    nl_test_parse_route(nl_test_find_route(&c, cases[i].key), 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+
+    if (cases[i].name)
+      nl_test_check_iface(cases[i].description, if_find_by_name(cases[i].name), cases[i].link);
+
+    while (n--)
+    {
+      links[n]->nlmsg_type = RTM_DELLINK;
+      nl_parse_link(links[n], 0);
+      xfree(links[n]);
+    }
+
+    nl_test_free(&c);
+  }
+
+  return 1;
+}
+
+/*
  *	Notifications
  */
 
@@ -2692,6 +2788,7 @@ nl_test_errno_name(int err)
   case ENODEV:		return "ENODEV";
   case EINVAL:		return "EINVAL";
   case ENETUNREACH:	return "ENETUNREACH";
+  case EHOSTUNREACH:	return "EHOSTUNREACH";
   default:		return "?";
   }
 }
@@ -2756,6 +2853,12 @@ t_parse_error(void)
       "route4/ng-025", 0, 0, "ENODEV Netlink: No such device" },
     { "route6/ng-001 negative: ip -6 route add 2001:db8:2::/64, no device: RTNETLINK answers: No such device",
       "route6/ng-001", 0, 0, "ENODEV Netlink: No such device" },
+    { "fibt/ipv4_route_test-054 negative: ip ro change 172.16.105.0/24 via 172.16.101.2, no such route: RTNETLINK answers: No such file or directory",
+      "fibt/ipv4_route_test-054", 0, 0, "ENOENT Netlink: No such file or directory" },
+    { "fibnh/ipv4_withv6_fcnal-005 negative: ip ro replace 172.16.101.1/32 via inet6 2001:db8:50::1 dev veth1, no route to the gateway: RTNETLINK answers: No route to host",
+      "fibnh/ipv4_withv6_fcnal-005", 0, 0, "EHOSTUNREACH Netlink: No route to host" },
+    { "fibt/ipv6_route_test-033 negative: ip -6 ro replace 2001:db8:104::/64 via 2001:db8:104::2, no route to the gateway: RTNETLINK answers: No route to host",
+      "fibt/ipv6_route_test-033", 0, 0, "EHOSTUNREACH Netlink: No route to host" },
     { "route4/gone-3 negative: ip -4 route del unreachable 0.0.0.0/0 ... nhid 10, no such route: RTNETLINK answers: No such process",
       "route4/gone-3", 0, 0, "ESRCH Netlink: No such process" },
     { "route6/gone-3 negative: ip -6 route del prohibit 8000::/1 ... nhid 10, no such route: RTNETLINK answers: No such process",
@@ -3656,6 +3759,7 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_route_changed, "Routes with one field or attribute changed");
   bt_test_suite(t_parse_route_multipath, "Multipath routes");
   bt_test_suite(t_parse_route_matrix, "Routes from the ip route matrix captures");
+  bt_test_suite(t_parse_route_get, "Routes of the ip route get captures");
   bt_test_suite(t_parse_monitor, "Notifications of the ip monitor capture");
   bt_test_suite(t_parse_error, "Kernel acknowledgements and errors from the ip route matrix captures");
 #ifdef HAVE_MPLS_KERNEL
