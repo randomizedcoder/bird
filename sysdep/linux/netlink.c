@@ -1003,7 +1003,9 @@ nl_parse_multipath(struct nl_parse_state *s, struct krt_proto *p, const net_addr
 
 	struct rtattr *enca[BIRD_RTA_MAX];
 	nl_attr_len = RTA_PAYLOAD(a[RTA_ENCAP]);
-	nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca));
+	if (!nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca)))
+	  goto err;
+
 	rv->labels = rta_get_mpls(enca[RTA_DST], rv->label);
       }
 #endif
@@ -2049,7 +2051,12 @@ nl_parse_route(struct nl_parse_state *s, struct nlmsghdr *h)
 	    {
 	      struct rtattr *enca[BIRD_RTA_MAX];
 	      nl_attr_len = RTA_PAYLOAD(a[RTA_ENCAP]);
-	      nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca));
+	      if (!nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca)))
+	      {
+		log(L_ERR "KRT: Received route %N with malformed encapsulation", net->n.addr);
+		return;
+	      }
+
 	      ra->nh.labels = rta_get_mpls(enca[RTA_DST], ra->nh.label);
 	      break;
 	    }
