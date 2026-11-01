@@ -692,6 +692,18 @@ t_parse_addr_changed(void)
     { "IPv4 deleted with another prefix length is kept (corner)",
       "192.0.2.1", RTM_DELADDR, NL_KEEP, 25, NL_KEEP, {}, 0, 1,
       "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "IPv4 prefix length 33 is rejected (negative)",
+      "192.0.2.1", RTM_NEWADDR, NL_KEEP, 33, NL_KEEP, {}, 0, 0,
+      "none" },
+    { "IPv4 prefix length 33 leaves the address alone (corner)",
+      "192.0.2.1", RTM_NEWADDR, NL_KEEP, 33, NL_KEEP, {}, 0, 1,
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "IPv4 prefix length 255 leaves the address alone (corner)",
+      "192.0.2.1", RTM_NEWADDR, NL_KEEP, 255, NL_KEEP, {}, 0, 1,
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "IPv4 deleted with prefix length 33 is kept (corner)",
+      "192.0.2.1", RTM_DELADDR, NL_KEEP, 33, NL_KEEP, {}, 0, 1,
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
 
     /* IPv6 */
     { "IPv6 unchanged copy (positive)",
@@ -727,6 +739,15 @@ t_parse_addr_changed(void)
     { "IPv6 deleted after being added (positive)",
       "2001:db8::1", RTM_DELADDR, NL_KEEP, NL_KEEP, NL_KEEP, {}, 0, 1,
       "none" },
+    { "IPv6 prefix length 129 is rejected (negative)",
+      "2001:db8::1", RTM_NEWADDR, NL_KEEP, 129, NL_KEEP, {}, 0, 0,
+      "none" },
+    { "IPv6 prefix length 129 leaves the address alone (corner)",
+      "2001:db8::1", RTM_NEWADDR, NL_KEEP, 129, NL_KEEP, {}, 0, 1,
+      "2001:db8::1 net 2001:db8::/64 scope univ primary" },
+    { "IPv6 prefix length 255 leaves the address alone (corner)",
+      "2001:db8::1", RTM_NEWADDR, NL_KEEP, 255, NL_KEEP, {}, 0, 1,
+      "2001:db8::1 net 2001:db8::/64 scope univ primary" },
   };
 
   struct nl_test_capture links, addrs;
