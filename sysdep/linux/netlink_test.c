@@ -1422,6 +1422,193 @@ t_parse_route_changed(void)
 }
 
 
+/*
+ *	Multipath routes
+ */
+
+#define NL_MP4		"table 254 203.0.113.0/24"
+#define NL_MP4_PFX	"k4 scan 203.0.113.0/24 alien proto 3 metric 0 unicast"
+#define NL_MP6		"table 254 2001:db8:2::/64"
+#define NL_MP6_PFX	"k6 scan 2001:db8:2::/64 alien proto 3 metric 1024 unicast"
+
+#define NL_NH_ZERO	-1		/* A length of 0, as 0 means the built one */
+
+struct nl_test_nh {
+  int len;			/* rtnh_len; 0 uses the built length */
+  byte flags;
+  byte hops;			/* Weight - 1 */
+  int ifindex;
+  struct nl_test_attr attr;	/* RTA_GATEWAY or RTA_VIA, type 0 for none */
+};
+
+#define NL_GW4(x)	{ RTA_GATEWAY, 4, x }
+#define NL_GW6(x)	{ RTA_GATEWAY, 16, x }
+
+/* Build an RTA_MULTIPATH payload of next hops nh[0..n), up to the first
+ * unset one, into buf; return its length */
+static int
+nl_test_multipath(byte *buf, uint size, const struct nl_test_nh *nh, uint n)
+{
+  uint pos = 0;
+
+  memset(buf, 0, size);
+
+  for (uint i = 0; (i < n) && (nh[i].ifindex || nh[i].len); i++)
+  {
+    struct rtnexthop *r = (void *) (buf + pos);
+    uint len = RTNH_LENGTH(nh[i].attr.type ? RTA_SPACE(nh[i].attr.len) : 0);
+
+    if (pos + RTNH_ALIGN(len) > size)
+      bt_abort_msg("Multipath buffer too small");
+
+    r->rtnh_len = (nh[i].len == NL_NH_ZERO) ? 0 : nh[i].len ? (uint) nh[i].len : len;
+    r->rtnh_flags = nh[i].flags;
+    r->rtnh_hops = nh[i].hops;
+    r->rtnh_ifindex = nh[i].ifindex;
+
+    if (nh[i].attr.type)
+    {
+      struct rtattr *a = RTNH_DATA(r);
+      a->rta_type = nh[i].attr.type;
+      a->rta_len = RTA_LENGTH(nh[i].attr.len);
+      memcpy(RTA_DATA(a), nh[i].attr.data, nh[i].attr.len);
+    }
+
+    pos += RTNH_ALIGN(len);
+  }
+
+  return pos;
+}
+
+static const byte nl_test_gw4_a[4] = { 192, 0, 2, 10 };
+static const byte nl_test_gw4_b[4] = { 192, 0, 2, 11 };
+static const byte nl_test_gw4_c[4] = { 192, 0, 2, 12 };
+static const byte nl_test_gw4_vrf[4] = { 198, 18, 11, 2 };
+static const byte nl_test_gw6_a[16] = { 0x20, 0x01, 0x0d, 0xb8, [15] = 2 };
+static const byte nl_test_gw6_b[16] = { 0x20, 0x01, 0x0d, 0xb8, [15] = 3 };
+static const byte nl_test_via6[18] = { AF_INET6, 0, 0x20, 0x01, 0x0d, 0xb8, [17] = 2 };
+
+static int
+t_parse_route_multipath(void)
+{
+  static const struct {
+    const char *description;
+    const char *base;		/* Captured multipath route whose RTA_MULTIPATH is replaced */
+    struct nl_test_nh nh[3];
+    int payload;		/* RTA_MULTIPATH payload length; 0 uses the built one */
+    const char *expected;
+  } cases[] = {
+    /* IPv4 */
+    { .description = "two next hops as captured, sorted (positive)", .base = NL_MP4,
+      .nh = { { .hops = 0, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .hops = 2, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_b) } },
+      .expected = NL_MP4_PFX " via 192.0.2.11 dev goip0 weight 3 via 192.0.2.10 dev goip0 weight 1" },
+    { .description = "one next hop (boundary)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) } },
+      .expected = NL_MP4_PFX " via 192.0.2.10 dev goip0" },
+    { .description = "three next hops (positive)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_b) },
+	      { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_c) } },
+      .expected = NL_MP4_PFX " via 192.0.2.10 dev goip0 weight 1 via 192.0.2.11 dev goip0 weight 1 via 192.0.2.12 dev goip0 weight 1" },
+    { .description = "next hop without a gateway (positive)", .base = NL_MP4,
+      .nh = { { .ifindex = 3 }, { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) } },
+      .expected = NL_MP4_PFX " dev goip0 weight 1 via 192.0.2.10 dev goip0 weight 1" },
+    { .description = "weight 256, the largest (boundary)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .hops = 255, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_b) } },
+      .expected = NL_MP4_PFX " via 192.0.2.11 dev goip0 weight 256 via 192.0.2.10 dev goip0 weight 1" },
+    { .description = "next hop on a VRF member interface (corner)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .ifindex = 5, .attr = NL_GW4(nl_test_gw4_vrf) } },
+      .expected = NL_MP4_PFX " via 192.0.2.10 dev goip0 weight 1 via 198.18.11.2 dev goipv weight 1" },
+    { .description = "RTA_VIA with an IPv6 gateway (positive)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = { RTA_VIA, sizeof(nl_test_via6), nl_test_via6 } } },
+      .expected = NL_MP4_PFX " via 2001:db8::2 dev goip0" },
+    { .description = "off-link gateway with RTNH_F_ONLINK (positive)", .base = NL_MP4,
+      .nh = { { .flags = RTNH_F_ONLINK, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_offlink) } },
+      .expected = NL_MP4_PFX " via 203.0.113.1 dev goip0 onlink" },
+    { .description = "off-link gateway is a strange next hop (negative)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_offlink) } },
+      .expected = "none" },
+    { .description = "own address as gateway is a strange next hop (negative)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_self) } },
+      .expected = "none" },
+    { .description = "unknown ifindex (negative)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .ifindex = 99, .attr = NL_GW4(nl_test_gw4_b) } },
+      .expected = "none" },
+    { .description = "gateway of 3 bytes (negative)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = { RTA_GATEWAY, 3, nl_test_gw4_a } } },
+      .expected = "none" },
+    { .description = "dead next hop is skipped (corner)", .base = NL_MP4,
+      .nh = { { .flags = RTNH_F_DEAD, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) },
+	      { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_b) } },
+      .expected = NL_MP4_PFX " via 192.0.2.11 dev goip0" },
+    { .description = "only dead next hops (corner)", .base = NL_MP4,
+      .nh = { { .flags = RTNH_F_DEAD, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) } },
+      .expected = "none" },
+    { .description = "empty payload (boundary)", .base = NL_MP4,
+      .payload = NL_NH_ZERO, .expected = "none" },
+    { .description = "payload shorter than struct rtnexthop (negative)", .base = NL_MP4,
+      .nh = { { .ifindex = 3 } }, .payload = sizeof(struct rtnexthop) - 1,
+      .expected = "none" },
+    { .description = "rtnh_len of exactly struct rtnexthop (boundary)", .base = NL_MP4,
+      .nh = { { .len = sizeof(struct rtnexthop), .ifindex = 3 } },
+      .expected = NL_MP4_PFX " dev goip0" },
+    { .description = "rtnh_len one less than struct rtnexthop (negative)", .base = NL_MP4,
+      .nh = { { .len = sizeof(struct rtnexthop) - 1, .ifindex = 3 } }, .payload = sizeof(struct rtnexthop),
+      .expected = "none" },
+    { .description = "rtnh_len of 0 (negative)", .base = NL_MP4,
+      .nh = { { .len = NL_NH_ZERO, .ifindex = 3 } },
+      .expected = "none" },
+    { .description = "rtnh_len longer than the payload (negative)", .base = NL_MP4,
+      .nh = { { .len = 64, .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) } },
+      .expected = "none" },
+    { .description = "trailing bytes after the last next hop (negative)", .base = NL_MP4,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) } }, .payload = 16 + 4,
+      .expected = "none" },
+
+    /* IPv6 */
+    { .description = "IPv6 two next hops as captured, sorted (positive)", .base = NL_MP6,
+      .nh = { { .hops = 0, .ifindex = 3, .attr = NL_GW6(nl_test_gw6_a) },
+	      { .hops = 2, .ifindex = 3, .attr = NL_GW6(nl_test_gw6_b) } },
+      .expected = NL_MP6_PFX " via 2001:db8::3 dev goip0 weight 3 via 2001:db8::2 dev goip0 weight 1" },
+    { .description = "IPv6 link-local gateway (positive)", .base = NL_MP6,
+      .nh = { { .ifindex = 3, .attr = NL_GW6(nl_test_gw6_ll) } },
+      .expected = NL_MP6_PFX " via fe80::1 dev goip0" },
+    { .description = "IPv6 route with a 4-byte gateway (negative)", .base = NL_MP6,
+      .nh = { { .ifindex = 3, .attr = NL_GW4(nl_test_gw4_a) } },
+      .expected = "none" },
+  };
+
+  struct nl_test_capture routes;
+  nl_test_route_setup();
+  nl_test_load(&routes, "route-dump.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    byte buf[128];
+    int len = nl_test_multipath(buf, sizeof(buf), cases[i].nh, ARRAY_SIZE(cases[i].nh));
+
+    if (cases[i].payload)
+      len = (cases[i].payload == NL_NH_ZERO) ? 0 : cases[i].payload;
+
+    struct nl_test_attr mp = { RTA_MULTIPATH, len, buf };
+    struct nlmsghdr *h = nl_test_copy(nl_test_find_route(&routes, cases[i].base), sizeof(struct rtmsg), &mp);
+
+    nl_test_parse_route(h, 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+    xfree(h);
+  }
+
+  nl_test_free(&routes);
+
+  return 1;
+}
+
+
 int
 main(int argc, char *argv[])
 {
@@ -1442,6 +1629,7 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_addr_changed, "Addresses with one field or attribute changed");
   bt_test_suite(t_parse_route_capture, "Routes from a captured route dump");
   bt_test_suite(t_parse_route_changed, "Routes with one field or attribute changed");
+  bt_test_suite(t_parse_route_multipath, "Multipath routes");
 
   return bt_exit_value();
 }
