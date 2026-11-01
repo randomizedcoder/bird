@@ -588,8 +588,9 @@ function_def:
      $7->args = this_function->function->args;
      $7->arg_list = this_function->function->arg_list;
      $7->return_type = this_function->function->return_type;
-     $2->function = $7;
+     this_function->function = $7;
      cf_pop_scope(new_config);
+     this_function = NULL;
    }
  ;
 
@@ -1115,5 +1116,17 @@ lvalue:
  | static_attr { $$ = (struct f_lval) { .type = F_LVAL_SA, .sa = $1, .rte = f_const_empty(T_ROUTE) }; }
  | dynamic_attr { $$ = (struct f_lval) { .type = F_LVAL_EA, .da = $1, .rte = f_const_empty(T_ROUTE) }; }
  ;
+
+CF_CODE
+
+/* A parse that fails midway (cf_error()) leaves the state of the rule it was
+ * in, so start each parse without it */
+void
+f_parse_init(void)
+{
+  this_function = NULL;
+  this_for_scope = NULL;
+  f_method_scope_pos = -1;
+}
 
 CF_END

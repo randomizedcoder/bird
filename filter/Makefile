@@ -19,7 +19,7 @@ prepare: $(o)inst-interpret.c $(o)inst-gen.h
 
 tests_src := tree_test.c trie_test.c
 ifeq ($(findstring bgp,$(protocols))-$(findstring static,$(protocols)),bgp-static)
-	tests_src += filter_test.c
+	tests_src += filter_test.c config_test.c
 endif
 tests_targets := $(tests_targets) $(tests-target-files)
 tests_objs := $(tests_objs) $(src-o-files)

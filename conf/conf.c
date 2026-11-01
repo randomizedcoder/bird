@@ -138,6 +138,7 @@ config_parse(struct config *c)
     goto cleanup;
 
   cf_lex_init(0, c);
+  f_parse_init();
   sysdep_preconfig(c);
   protos_preconfig(c);
   mpls_preconfig(c);
@@ -178,6 +179,7 @@ cli_parse(struct config *c)
     goto cleanup;
 
   cf_lex_init(1, c);
+  f_parse_init();
   cf_parse();
   done = 1;
 
