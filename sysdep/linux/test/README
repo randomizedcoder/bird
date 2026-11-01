@@ -86,6 +86,74 @@ is outside the bridge:
   vlan_event/ip.pcap, "bridge monitor vlan" while VLAN 4000, 10 and 20-30
   were added to v0 and 10 deleted: RTM_NEWVLAN and RTM_DELVLAN only
 
+ws/route4/<row>/ and ws/route6/<row>/ hold rows of xtcp2's ip route
+matrix, commit bb0a1c34 (pkg/xtcpnl/testdata/7_3_0/ws/), same kernel.
+Each row ran one "ip route" command in a fresh namespace: lo 1, nlmon0 2
+and a dummy interface d0 (3) with 192.0.2.10/24, 2001:db8:1::10/64 and
+nexthop 10 via d0. Its cmd.json (not copied) names the command and its
+category: positive (ps), negative (ng), edge (ec), pairwise (pw),
+duplicate (dup) and gone (gone).
+
+  <row>/netlink_route_dump.pcap   "ip route show table all" afterwards
+  <row>/ip.pcap                   the command itself, ending with the
+                                  kernel's NLMSG_ERROR (an ack or errno)
+
+The ws rows read back no links or addresses, so the test loads those of
+brmpls/route_encap_show, whose d0 is index 3 too, with d0's addresses
+changed in memory to 192.0.2.10/24 and 2001:db8:1::10/64.
+
+kinds/<kind>/<row>/netlink_route_getlink_detail.pcap are "ip -d link
+show" after "ip link add ... type <kind>", from xtcp2's link-write kinds
+corpus, commit b06f338c (link-write/kinds/), same kernel: VXLAN (vx0), GRE
+(gr0), IPIP (ip0), SIT (st0) and VTI (vt0) links, index 3, or 4 after a
+dummy d0.
+
+addr-show/<row>/netlink_route_getaddr.pcap are "ip addr show" (links and
+addresses) after the row's "ip addr add" commands, commit b06f338c
+(link-write/addr-show/), same kernel. Most rows add to a dummy d0 (3,
+02:00:00:00:d0:00, addrgenmode none):
+
+  v4_secondary   192.0.2.1/24, 192.0.2.2/24
+  v4_label       192.0.2.1/24 label d0:1, 192.0.2.9/24 label d0:9
+  v4_peer        10.0.0.1 peer 10.0.0.2/32
+  v4_brd         192.0.2.1/24 brd +, 198.51.100.1/24 brd -,
+                 203.0.113.0/31 brd +
+  v4_host_scope  127.0.0.2/8
+  v4_autojoin    224.0.0.251/32 autojoin
+  v4_deprecated  192.0.2.1/24 valid_lft 3600 preferred_lft 0
+  v4_lifetimes   192.0.2.1/24 valid_lft 3600 preferred_lft 1800
+  v4_metric      192.0.2.1/24 metric 50
+  v4_proto       192.0.2.1/24 proto 99, 198.51.100.1/24 proto kernel_lo
+  v4_vrf         vrf0 (3, table 10) with d0 (4) 192.0.2.1/24, and d1 (5)
+                 198.51.100.1/24
+  mixed_links    d0 192.0.2.1/24, d1 (4, down) 198.51.100.1/24, d2 (5),
+                 bond0 (6), its port d3 (7) 203.0.113.1/24
+  v6_flags       2001:db8::1/64 nodad, 2001:db8:1::1/64 home,
+                 2001:db8:2::1/64 nodad mngtmpaddr noprefixroute,
+                 2001:db8:3::1/48 nodad
+  v6_peer        2001:db8::1 peer 2001:db8::2/128 nodad
+  v6_temporary   use_tempaddr 2, 2001:db8::1/64 mngtmpaddr, and the
+                 temporary address the kernel made from it
+  v6_stable_privacy  addrgenmode random, its link-local address
+  v6_tentative   veth v0 (4) 2001:db8::5/64, DAD still running
+  v6_optimistic  veth v0 (4) 2001:db8::5/64 optimistic, v1 (3)
+  v6_dadfailed   veth v0 (3) 2001:db8::5/64, also on its peer in
+                 another namespace
+
+rtnl/monitor_all/ip.pcap is "ip monitor all" during a row of changes,
+commit b06f338c (link-write/rtnl/monitor_all/), same kernel. It starts
+with ip's dump of link names (lo, nlmon0, c0 3, d0 4, r0p 5, r0 6,
+IFLA_IFNAME only); the notifications have sequence number 0. ip printed
+(ip.out, not copied):
+
+  inet 224.0.0.250/32 scope global autojoin c0, its local route
+  d0 up, multicast ff00::/8 dev d0 table local
+  2001:db8:1::/64 dev d0 proto kernel, inet6 2001:db8:1::1/64 nodad
+  dev d0, its local and anycast routes
+  netconf, rule, nexthop, l3 stats and nsid changes
+  2001:db8:5::/64 dev r0 proto kernel expires 600sec, a prefix
+  from a router advert
+
 Netlink messages are in host byte order, so the tests of the captures
 are skipped on big-endian hosts.
 

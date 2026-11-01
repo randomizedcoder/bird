@@ -36,8 +36,14 @@
 #define kbr_do_fdb_scan		nl_test_unused_kbr_do_fdb_scan
 #define kbr_do_vlan_scan	nl_test_unused_kbr_do_vlan_scan
 
+/* nl_error() logs with this; record it instead */
+struct tbf;
+void nl_test_log_rl(struct tbf *rl, const char *msg, ...);
+#define log_rl			nl_test_log_rl
+
 #include "sysdep/linux/netlink.c"
 
+#undef log_rl
 #undef krt_got_route
 #undef krt_got_route_async
 #undef krt_sys_start
@@ -324,6 +330,21 @@ nl_test_format_iface(struct iface *i, char *buf, uint size)
   u32 vlan_filtering = ea_get_int(attrs, EA_IFACE_BRIDGE_VLAN_FILTERING, U32_UNDEF);
   if (vlan_filtering != U32_UNDEF)
     pos += bsnprintf(pos, buf + size - pos, " vlan-filtering %u", vlan_filtering);
+
+  if (ea_get_int(attrs, EA_IFACE_TYPE, IF_TYPE_UNDEF) == IF_TYPE_VXLAN)
+    pos += bsnprintf(pos, buf + size - pos, " vxlan");
+
+  u32 vni = ea_get_int(attrs, EA_IFACE_VXLAN_ID, U32_UNDEF);
+  if (vni != U32_UNDEF)
+    pos += bsnprintf(pos, buf + size - pos, " vni %u", vni);
+
+  u32 learning = ea_get_int(attrs, EA_IFACE_VXLAN_LEARNING, U32_UNDEF);
+  if (learning != U32_UNDEF)
+    pos += bsnprintf(pos, buf + size - pos, " learning %u", learning);
+
+  eattr *ea = ea_find(attrs, EA_IFACE_VXLAN_IP_ADDR);
+  if (ea)
+    pos += bsnprintf(pos, buf + size - pos, " local %I", *(ip_addr *) ea->u.ptr->data);
 
   const byte *m = i->lladdr.addr;
   if (m[0] | m[1] | m[2] | m[3] | m[4] | m[5])
@@ -616,6 +637,93 @@ t_parse_link_bridge(void)
   return 1;
 }
 
+
+/*
+ * Links of other kinds, from xtcp2's link-write kinds corpus (see README):
+ * each row created one link (index 3, after lo and nlmon0, or 4 after a
+ * dummy d0) and read back "ip -d link show". The links are down.
+ */
+static int
+t_parse_link_kinds(void)
+{
+  static const struct {
+    const char *description;
+    const char *row;		/* kinds row, see README */
+    const char *name;
+    const char *expected;
+  } cases[] = {
+    { "kinds/vxlan/add_default: ip link add vx0 type vxlan id 42",
+      "vxlan/add_default", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 42 learning 1 lladdr a2:af:d3:fa:9d:cf" },
+    { "kinds/vxlan/add_local: vxlan id 42 local 10.0.0.1",
+      "vxlan/add_local", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 42 learning 1 local 10.0.0.1 lladdr 26:26:85:4f:60:77" },
+    { "kinds/vxlan/add_local6_link_local: vxlan id 42 local fe80::1 dev d0, index 4",
+      "vxlan/add_local6_link_local", "vx0",
+      "vx0 index 4 mtu 1430 multiaccess broadcast multicast vxlan vni 42 learning 1 local fe80::1 lladdr 72:e8:27:5f:cc:a5" },
+    { "kinds/vxlan/add_remote6: vxlan id 42 remote 2001:db8::1, no local address",
+      "vxlan/add_remote6", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 42 learning 1 lladdr 86:92:7c:0b:78:95" },
+    { "kinds/vxlan/add_external: vxlan external, id 0 and nolearning",
+      "vxlan/add_external", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 0 learning 0 lladdr 7a:76:fc:4f:6c:66" },
+    { "kinds/vxlan/add_nolearning: vxlan id 42 nolearning",
+      "vxlan/add_nolearning", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 42 learning 0 lladdr 6a:f6:9c:64:75:c4" },
+    { "kinds/vxlan/add_id_max: vxlan id 16777215, the highest (boundary)",
+      "vxlan/add_id_max", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 16777215 learning 1 lladdr e6:43:11:8b:b6:fd" },
+    { "kinds/vxlan/add_id_zero: vxlan id 0, the lowest (boundary)",
+      "vxlan/add_id_zero", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 0 learning 1 lladdr 06:dc:d3:a8:57:3c" },
+    { "kinds/vxlan/add_vnifilter: vxlan external vnifilter (corner)",
+      "vxlan/add_vnifilter", "vx0",
+      "vx0 index 3 mtu 1500 multiaccess broadcast multicast vxlan vni 0 learning 0 lladdr 7e:06:42:c0:be:4f" },
+    { "kinds/gre/add_local: gre local 10.0.0.2, NOARP, neither point-to-point nor broadcast",
+      "gre/add_local", "gr0",
+      "gr0 index 3 mtu 1476 multiaccess" },
+    { "kinds/ipip/add_local: ipip remote 10.0.0.1 local 10.0.0.2, point-to-point",
+      "ipip/add_local", "ip0",
+      "ip0 index 3 mtu 1480 multicast" },
+    { "kinds/sit/add_default: sit remote 10.0.0.1, point-to-point",
+      "sit/add_default", "st0",
+      "st0 index 3 mtu 1480 multicast" },
+    { "kinds/vti/add_default: vti remote 10.0.0.1 local 10.0.0.2, point-to-point",
+      "vti/add_default", "vt0",
+      "vt0 index 3 mtu 1480 multicast" },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture c;
+    char name[128];
+
+    bsnprintf(name, sizeof(name), "kinds/%s/netlink_route_getlink_detail.pcap", cases[i].row);
+    nl_test_load(&c, name);
+
+    /* The last one: ip first looks the link up by name, with a reply of
+     * only IFLA_IFNAME */
+    struct nlmsghdr *h = NULL;
+    for (uint j = 0; j < c.count; j++)
+      if ((c.msg[j]->nlmsg_type == RTM_NEWLINK) && !strcmp(nl_test_link_name(c.msg[j]), cases[i].name))
+	h = c.msg[j];
+
+    if (!h)
+      bt_abort_msg("No link %s in the capture", cases[i].name);
+
+    struct ifinfomsg *ifi = NLMSG_DATA(h);
+    nl_parse_link(h, 0);
+    nl_test_check_iface(cases[i].description, if_find_by_index(ifi->ifi_index), cases[i].expected);
+
+    /* Gone again, for the next row's link of the same index */
+    h->nlmsg_type = RTM_DELLINK;
+    nl_parse_link(h, 0);
+
+    nl_test_free(&c);
+  }
+
+  return 1;
+}
 
 /*
  *	Addresses
@@ -969,6 +1077,136 @@ t_parse_addr_changed(void)
   return 1;
 }
 
+/*
+ * The addresses of xtcp2's link-write addr-show rows (see README): each row
+ * added addresses to a dummy d0 (index 3, after lo and nlmon0) or other
+ * links, then ran "ip addr show", whose dump has the links and addresses.
+ * The links are parsed, then the addresses, then all is deleted again, in
+ * reverse, for the next row's links of the same names.
+ */
+static int
+t_parse_addr_show(void)
+{
+  static const struct {
+    const char *description;
+    const char *row;		/* addr-show row, see README */
+    const char *name;
+    const char *expected;
+  } cases[] = {
+    /* IPv4 */
+    { "v4_secondary: 192.0.2.1/24 and 192.0.2.2/24, the second one secondary (positive)",
+      "v4_secondary", "d0",
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary, "
+      "192.0.2.2 net 192.0.2.0/24 brd 192.0.2.255 scope univ secondary" },
+    { "v4_label: 192.0.2.1/24 label d0:1 and 192.0.2.9/24 label d0:9, labels ignored (positive)",
+      "v4_label", "d0",
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary, "
+      "192.0.2.9 net 192.0.2.0/24 brd 192.0.2.255 scope univ secondary" },
+    { "v4_peer: 10.0.0.1 peer 10.0.0.2/32, private so scope site (boundary)",
+      "v4_peer", "d0", "10.0.0.1 net 10.0.0.2/32 brd 10.0.0.2 opposite 10.0.0.2 scope site primary peer" },
+    { "v4_brd: brd +, brd - (198.51.100.0, trusted) and a /31 with brd + (corner)",
+      "v4_brd", "d0",
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary, "
+      "198.51.100.1 net 198.51.100.0/24 brd 198.51.100.0 scope univ, "
+      "203.0.113.0 net 203.0.113.0/31 opposite 203.0.113.1 scope univ" },
+    { "v4_host_scope: 127.0.0.2/8, scope host (corner)",
+      "v4_host_scope", "d0", "127.0.0.2 net 127.0.0.0/8 brd 127.255.255.255 scope host primary" },
+    { "v4_autojoin: 224.0.0.251/32 autojoin, a multicast address taken as a host address (corner)",
+      "v4_autojoin", "d0", "224.0.0.251 net 224.0.0.251/32 brd 224.0.0.251 scope univ primary host" },
+    { "v4_deprecated: 192.0.2.1/24 preferred_lft 0, deprecated (corner)",
+      "v4_deprecated", "d0", "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "v4_lifetimes: 192.0.2.1/24 valid_lft 3600 preferred_lft 1800, dynamic (positive)",
+      "v4_lifetimes", "d0", "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "v4_metric: 192.0.2.1/24 metric 50, IFA_RT_PRIORITY ignored (positive)",
+      "v4_metric", "d0", "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "v4_proto: proto 99 and proto kernel_lo, IFA_PROTO ignored (positive)",
+      "v4_proto", "d0",
+      "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary, "
+      "198.51.100.1 net 198.51.100.0/24 brd 198.51.100.255 scope univ" },
+    { "v4_vrf: d0 in vrf0 (index 4) with 192.0.2.1/24",
+      "v4_vrf", "d0", "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "v4_vrf: d1 (index 5) with 198.51.100.1/24",
+      "v4_vrf", "d1", "198.51.100.1 net 198.51.100.0/24 brd 198.51.100.255 scope univ primary" },
+    { "v4_vrf: vrf0 (index 3) without addresses",
+      "v4_vrf", "vrf0", "none" },
+    { "mixed_links: d0 up with 192.0.2.1/24",
+      "mixed_links", "d0", "192.0.2.1 net 192.0.2.0/24 brd 192.0.2.255 scope univ primary" },
+    { "mixed_links: d1 down with 198.51.100.1/24",
+      "mixed_links", "d1", "198.51.100.1 net 198.51.100.0/24 brd 198.51.100.255 scope univ primary" },
+    { "mixed_links: d2 up without addresses",
+      "mixed_links", "d2", "none" },
+    { "mixed_links: d3, a bond0 port, with 203.0.113.1/24",
+      "mixed_links", "d3", "203.0.113.1 net 203.0.113.0/24 brd 203.0.113.255 scope univ primary" },
+    { "mixed_links: bond0 without addresses",
+      "mixed_links", "bond0", "none" },
+
+    /* IPv6 */
+    { "v6_flags: nodad, home, mngtmpaddr noprefixroute and a /48 (positive)",
+      "v6_flags", "d0",
+      "2001:db8:3::1 net 2001:db8:3::/48 scope univ primary, "
+      "2001:db8:2::1 net 2001:db8:2::/64 scope univ, "
+      "2001:db8:1::1 net 2001:db8:1::/64 scope univ, "
+      "2001:db8::1 net 2001:db8::/64 scope univ" },
+    { "v6_peer: 2001:db8::1 peer 2001:db8::2/128 (boundary)",
+      "v6_peer", "d0", "2001:db8::1 net 2001:db8::2/128 brd 2001:db8::2 opposite 2001:db8::2 scope univ primary peer" },
+    { "v6_temporary: a temporary address, IFA_F_TEMPORARY taken as IFA_F_SECONDARY (corner)",
+      "v6_temporary", "d0",
+      "2001:db8::fbed:f0b4:1fd0:cabe net 2001:db8::/64 scope univ secondary, "
+      "2001:db8::1 net 2001:db8::/64 scope univ primary" },
+    { "v6_stable_privacy: link-local address of addrgenmode random (positive)",
+      "v6_stable_privacy", "d0", "fe80::c764:67be:9f7a:f3f3 net fe80::/64 scope link primary" },
+    { "v6_tentative: 2001:db8::5/64 tentative, ignored (negative)",
+      "v6_tentative", "v0", "none" },
+    { "v6_optimistic: optimistic tentative addresses, ignored (negative)",
+      "v6_optimistic", "v0", "none" },
+    { "v6_optimistic: v1, a tentative link-local address, ignored (negative)",
+      "v6_optimistic", "v1", "none" },
+    { "v6_dadfailed: dadfailed tentative and a tentative link-local address, ignored (negative)",
+      "v6_dadfailed", "v0", "none" },
+  };
+
+  nl_test_kif_init();
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture c;
+    char name[128];
+
+    bsnprintf(name, sizeof(name), "addr-show/%s/netlink_route_getaddr.pcap", cases[i].row);
+    nl_test_load(&c, name);
+
+    for (uint j = 0; j < c.count; j++)
+      if (c.msg[j]->nlmsg_type == RTM_NEWLINK)
+	nl_parse_link(c.msg[j], 0);
+
+    for (uint j = 0; j < c.count; j++)
+      if (c.msg[j]->nlmsg_type == RTM_NEWADDR)
+	nl_parse_addr(c.msg[j], 0);
+
+    struct ifinfomsg *ifi = NLMSG_DATA(nl_test_find_link(&c, cases[i].name));
+    nl_test_check_addrs(cases[i].description, if_find_by_index(ifi->ifi_index), cases[i].expected);
+
+    /* Gone again, for the next row's links */
+    for (uint j = c.count; j--; )
+      if (c.msg[j]->nlmsg_type == RTM_NEWADDR)
+      {
+	c.msg[j]->nlmsg_type = RTM_DELADDR;
+	nl_parse_addr(c.msg[j], 0);
+      }
+
+    for (uint j = c.count; j--; )
+      if (c.msg[j]->nlmsg_type == RTM_NEWLINK)
+      {
+	c.msg[j]->nlmsg_type = RTM_DELLINK;
+	nl_parse_link(c.msg[j], 0);
+      }
+
+    nl_test_free(&c);
+  }
+
+  return 1;
+}
+
 
 /*
  *	Routes
@@ -1182,11 +1420,11 @@ nl_test_pump(void)
 }
 
 static void
-nl_test_route_setup(void)
+nl_test_route_setup_config(const char *config)
 {
   struct nl_test_capture links, addrs;
 
-  bt_assert_msg(bt_config_parse(NL_TEST_ROUTE_CONFIG), "Route test config");
+  bt_assert_msg(bt_config_parse(config), "Route test config");
   nl_test_pump();
 
   nl_test_load_links(&links);
@@ -1198,6 +1436,12 @@ nl_test_route_setup(void)
 
   nl_test_free(&links);
   nl_test_free(&addrs);
+}
+
+static void
+nl_test_route_setup(void)
+{
+  nl_test_route_setup_config(NL_TEST_ROUTE_CONFIG);
 }
 
 static void
@@ -1327,6 +1571,52 @@ t_parse_route_capture(void)
       found |= !strcmp(cases[j].key, key);
 
     bt_assert_msg(found, "No case for captured route %s", key);
+  }
+
+  nl_test_free(&routes);
+
+  return 1;
+}
+
+/* An IPv6 SADR channel for the main table, which takes source prefixes */
+#define NL_TEST_SADR_CONFIG						\
+  "router id 192.0.2.1;\n"						\
+  "ipv6 sadr table s6;\n"						\
+  "protocol device { scan time 86400; }\n"				\
+  "protocol kernel k6s { ipv6 sadr { table s6; import all; }; learn all; scan time 86400; }\n"
+
+/* IPv6 routes of the capture on a SADR channel */
+static int
+t_parse_route_sadr(void)
+{
+  static const struct {
+    const char *description;
+    const char *key;		/* See nl_test_route_key() */
+    const char *expected;
+  } cases[] = {
+    { "2001:db8:4::/64 from 2001:db8:5::/64 dev goip0: source prefix kept",
+      "table 254 2001:db8:4::/64",
+      "k6s scan 2001:db8:4::/64 from 2001:db8:5::/64 alien proto 3 metric 1024 unicast dev goip0" },
+    { "2001:db8:1::/64 via 2001:db8::2 dev goip0 metric 1024: no source prefix, from ::/0",
+      "table 254 2001:db8:1::/64",
+      "k6s scan 2001:db8:1::/64 from ::/0 alien proto 3 metric 1024 unicast via 2001:db8::2 dev goip0" },
+    { "2001:db8:2::/64 multipath: no source prefix, from ::/0",
+      "table 254 2001:db8:2::/64",
+      "k6s scan 2001:db8:2::/64 from ::/0 alien proto 3 metric 1024 unicast via 2001:db8::3 dev goip0 weight 3 via 2001:db8::2 dev goip0 weight 1" },
+    { "198.18.0.0/24 via 192.0.2.10 dev goip0: IPv4, no IPv4 channel",
+      "table 254 198.18.0.0/24", "none" },
+    { "fe80::/64 dev goip0: link scope, skipped",
+      "table 254 fe80::/64", "none" },
+  };
+
+  struct nl_test_capture routes;
+  nl_test_route_setup_config(NL_TEST_SADR_CONFIG);
+  nl_test_load(&routes, "route-dump.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    nl_test_parse_route(nl_test_find_route(&routes, cases[i].key), 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
   }
 
   nl_test_free(&routes);
@@ -1918,12 +2208,11 @@ t_parse_mpls_event(void)
   nl_test_load_ns("mpls_event");
   nl_test_load(&events, NL_TEST_BRMPLS "mpls_event/ip.pcap");
 
-  struct nl_parse_state s = { .pool = nl_linpool };
+  /* As notifications arrive, every message of the capture */
   nl_test_routes_reset();
 
   for (uint i = 0; i < events.count; i++)
-    if ((events.msg[i]->nlmsg_type == RTM_NEWROUTE) || (events.msg[i]->nlmsg_type == RTM_DELROUTE))
-      nl_parse_route(&s, events.msg[i]);
+    nl_async_msg(events.msg[i]);
 
   nl_test_check_routes("104 as to 204 and 198.18.23.0/24 encap mpls 105, each added and deleted",
 			"km add 104 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 204; "
@@ -1937,6 +2226,569 @@ t_parse_mpls_event(void)
 
 #endif
 
+/*
+ *	Route matrix
+ */
+
+/* Kernel protocols for every table the ws rows use, both families: main
+ * (254), 100, local (255), 256 and the highest table ID */
+#define NL_TEST_WS_CONFIG						\
+  "router id 192.0.2.10;\n"						\
+  "ipv4 table t4v; ipv4 table t4l; ipv4 table t4h; ipv4 table t4m;\n"	\
+  "ipv6 table t6v; ipv6 table t6l; ipv6 table t6h; ipv6 table t6m;\n"	\
+  "protocol device { scan time 86400; }\n"				\
+  "protocol kernel k4 { ipv4 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k6 { ipv6 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k4v { ipv4 { table t4v; import all; }; kernel table 100; learn all; scan time 86400; }\n" \
+  "protocol kernel k6v { ipv6 { table t6v; import all; }; kernel table 100; learn all; scan time 86400; }\n" \
+  "protocol kernel k4l { ipv4 { table t4l; import all; }; kernel table 255; learn all; scan time 86400; }\n" \
+  "protocol kernel k6l { ipv6 { table t6l; import all; }; kernel table 255; learn all; scan time 86400; }\n" \
+  "protocol kernel k4h { ipv4 { table t4h; import all; }; kernel table 256; learn all; scan time 86400; }\n" \
+  "protocol kernel k6h { ipv6 { table t6h; import all; }; kernel table 256; learn all; scan time 86400; }\n" \
+  "protocol kernel k4m { ipv4 { table t4m; import all; }; kernel table 4294967295; learn all; scan time 86400; }\n" \
+  "protocol kernel k6m { ipv6 { table t6m; import all; }; kernel table 4294967295; learn all; scan time 86400; }\n"
+
+#define NL_TEST_WS "ws/"
+
+static const byte nl_test_ws_ip4[4] = { 192, 0, 2, 10 };
+static const byte nl_test_ws_ip6[16] = { 0x20, 0x01, 0x0d, 0xb8, 0, 1, [15] = 0x10 };
+
+/*
+ * The namespace of xtcp2's ws rows: lo 1, nlmon0 2 and a dummy interface d0
+ * (3) with 192.0.2.10/24 and 2001:db8:1::10/64. The ws rows read back no
+ * links or addresses, so these are those of the brmpls row
+ * route_encap_show, whose d0 is also index 3, with d0's addresses changed.
+ */
+/* d0's addresses, as changed */
+static struct nlmsghdr *nl_test_ws_addr[2];
+
+static void
+nl_test_ws_setup(void)
+{
+  struct nl_test_capture links, addrs;
+
+  bt_assert_msg(bt_config_parse(NL_TEST_WS_CONFIG), "Route matrix config");
+  nl_test_pump();
+
+  nl_test_load(&links, "brmpls/route_encap_show/netlink_route_getlink.pcap");
+  for (uint i = 0; i < links.count; i++)
+    if (links.msg[i]->nlmsg_type == RTM_NEWLINK)
+      nl_parse_link(links.msg[i], 0);
+
+  nl_test_load(&addrs, "brmpls/route_encap_show/netlink_route_getaddr.pcap");
+  struct nlmsghdr *a4 = nl_test_find_addr(&addrs, "192.0.2.1");
+  struct nlmsghdr *a6 = nl_test_find_addr(&addrs, "2001:db8::1");
+
+  for (uint i = 0; i < addrs.count; i++)
+    if ((addrs.msg[i]->nlmsg_type == RTM_NEWADDR) && (addrs.msg[i] != a4) && (addrs.msg[i] != a6))
+      nl_parse_addr(addrs.msg[i], 0);
+
+  struct nl_test_attr local4 = { IFA_LOCAL, sizeof(nl_test_ws_ip4), nl_test_ws_ip4 };
+  struct nl_test_attr addr4 = { IFA_ADDRESS, sizeof(nl_test_ws_ip4), nl_test_ws_ip4 };
+  struct nl_test_attr addr6 = { IFA_ADDRESS, sizeof(nl_test_ws_ip6), nl_test_ws_ip6 };
+
+  struct nlmsghdr *h = nl_test_copy(a4, sizeof(struct ifaddrmsg), &local4);
+  nl_test_ws_addr[0] = nl_test_copy(h, sizeof(struct ifaddrmsg), &addr4);
+  nl_test_ws_addr[1] = nl_test_copy(a6, sizeof(struct ifaddrmsg), &addr6);
+  xfree(h);
+
+  for (uint i = 0; i < ARRAY_SIZE(nl_test_ws_addr); i++)
+    nl_parse_addr(nl_test_ws_addr[i], 0);
+
+  nl_test_free(&links);
+  nl_test_free(&addrs);
+}
+
+/* Remove d0's changed addresses, which the suites run after this one
+ * without -f do not expect */
+static void
+nl_test_ws_cleanup(void)
+{
+  for (uint i = 0; i < ARRAY_SIZE(nl_test_ws_addr); i++)
+  {
+    nl_test_ws_addr[i]->nlmsg_type = RTM_DELADDR;
+    nl_parse_addr(nl_test_ws_addr[i], 0);
+    xfree(nl_test_ws_addr[i]);
+  }
+}
+
+/*
+ * Routes of xtcp2's pairwise ip route matrix (ws/route4 and ws/route6, see
+ * README), each the route one ip command left, in the route dump read back
+ * after it. The descriptions give the row, its category and the route as
+ * `ip route show table all` printed it.
+ */
+static int
+t_parse_route_matrix(void)
+{
+  static const struct {
+    const char *description;
+    const char *row;		/* ws row, see README */
+    const char *key;		/* See nl_test_route_key() */
+    const char *expected;
+  } cases[] = {
+    { "route4/ec-001 positive: 198.51.100.0/24 dev d0 scope link",
+      "route4/ec-001", "table 254 198.51.100.0/24",
+      "k4 scan 198.51.100.0/24 alien proto 3 metric 0 unicast dev d0 scope 253" },
+    { "route4/pw-001 corner: default via 192.0.2.1 dev d0 proto static src 192.0.2.10 mtu 1280",
+      "route4/pw-001", "table 254 0.0.0.0/0",
+      "k4 scan 0.0.0.0/0 alien proto 4 metric 0 unicast via 192.0.2.1 dev d0 prefsrc 192.0.2.10 mtu 1280" },
+    { "route4/bd-001 boundary: default dev d0 table local proto 255 scope link",
+      "route4/bd-001", "table 255 0.0.0.0/0",
+      "k4l scan 0.0.0.0/0 alien proto 255 metric 0 unicast dev d0 scope 253" },
+    { "route4/bd-002 boundary: 128.0.0.0/1 dev d0 table 256 proto 255 scope link metric 4294967295",
+      "route4/bd-002", "table 256 128.0.0.0/1",
+      "k4h scan 128.0.0.0/1 alien proto 255 metric 4294967295 unicast dev d0 scope 253" },
+    { "route4/bd-003 boundary: 198.51.100.6/31 dev d0 table 4294967295 proto 255 scope link",
+      "route4/bd-003", "table 4294967295 198.51.100.6/31",
+      "k4m scan 198.51.100.6/31 alien proto 255 metric 0 unicast dev d0 scope 253" },
+    { "route4/bd-004 boundary: 198.51.100.7 dev d0 table local proto 255 scope link metric 4294967295",
+      "route4/bd-004", "table 255 198.51.100.7/32",
+      "k4l scan 198.51.100.7/32 alien proto 255 metric 4294967295 unicast dev d0 scope 253" },
+    { "route4/ec-006 boundary: blackhole 198.51.100.7 nhid 10 via 192.0.2.1 dev d0 table 4294967295: the nexthop of a blackhole ignored",
+      "route4/ec-006", "table 4294967295 198.51.100.7/32",
+      "k4m scan 198.51.100.7/32 alien proto 3 metric 0 blackhole" },
+    { "route4/ec-007 corner: unreachable 203.0.113.0/24",
+      "route4/ec-007", "table 254 203.0.113.0/24",
+      "k4 scan 203.0.113.0/24 alien proto 3 metric 0 unreachable" },
+    { "route4/ec-008 positive: prohibit 198.51.100.0/24 nhid 10 via 192.0.2.1 dev d0: the nexthop of a prohibit route ignored",
+      "route4/ec-008", "table 254 198.51.100.0/24",
+      "k4 scan 198.51.100.0/24 alien proto 3 metric 0 prohibit" },
+    { "route4/ec-009 positive: throw 198.51.100.0/24 nhid 10 via 192.0.2.1 dev d0: throw, skipped",
+      "route4/ec-009", "table 254 198.51.100.0/24",
+      "none" },
+    { "route4/ec-010 positive: 198.51.100.0/24 via inet6 2001:db8:1::1 dev d0",
+      "route4/ec-010", "table 254 198.51.100.0/24",
+      "k4 scan 198.51.100.0/24 alien proto 3 metric 0 unicast via 2001:db8:1::1 dev d0" },
+    { "route4/pw-004 corner: multicast 198.51.100.6/31 table 256 src 192.0.2.10 metric 7 mtu lock 1400 nexthop via 192.0.2.1 dev d0 weight 1 nexthop via 192.0.2.2 dev d0 weight 256: multicast, skipped",
+      "route4/pw-004", "table 256 multicast 198.51.100.6/31",
+      "none" },
+    { "route4/pw-005 corner: blackhole 198.51.100.7 nhid 10 via 192.0.2.1 dev d0 table 4294967295 proto static scope link src 192.0.2.10 mtu lock 1400",
+      "route4/pw-005", "table 4294967295 198.51.100.7/32",
+      "k4m scan 198.51.100.7/32 alien proto 4 metric 0 blackhole scope 253 prefsrc 192.0.2.10 lock 4 mtu 1400" },
+    { "route4/pw-006 corner: unreachable 203.0.113.0/24 proto 255 src 192.0.2.10 advmss 1300",
+      "route4/pw-006", "table 254 203.0.113.0/24",
+      "k4 scan 203.0.113.0/24 alien proto 255 metric 0 unreachable prefsrc 192.0.2.10 advmss 1300" },
+    { "route4/pw-007 boundary: 198.51.100.0/24 via inet6 2001:db8:1::1 dev d0 table 100 scope link src 192.0.2.10 metric 4294967295 mtu 1280",
+      "route4/pw-007", "table 100 198.51.100.0/24",
+      "k4v scan 198.51.100.0/24 alien proto 3 metric 4294967295 unicast via 2001:db8:1::1 dev d0 scope 253 prefsrc 192.0.2.10 mtu 1280" },
+    { "route4/pw-011 corner: blackhole 198.51.100.6/31 nhid 10 via 192.0.2.1 dev d0 proto unspec mtu 1280: proto unspec, skipped",
+      "route4/pw-011", "table 254 198.51.100.6/31",
+      "none" },
+    { "route4/pw-013 corner: prohibit 203.0.113.0/24 table 256 scope host advmss 1300",
+      "route4/pw-013", "table 256 203.0.113.0/24",
+      "k4h scan 203.0.113.0/24 alien proto 3 metric 0 prohibit scope 254 advmss 1300" },
+    { "route4/pw-014 boundary: local 198.51.100.0/24 dev d0 table local scope host mtu 1280: local, skipped",
+      "route4/pw-014", "table 255 local 198.51.100.0/24",
+      "none" },
+    { "route4/pw-017 corner: 128.0.0.0/1 proto static metric 7 mtu lock 1400 nexthop via 192.0.2.1 dev d0 weight 1 nexthop via 192.0.2.2 dev d0 weight 256",
+      "route4/pw-017", "table 254 128.0.0.0/1",
+      "k4 scan 128.0.0.0/1 alien proto 4 metric 7 unicast via 192.0.2.2 dev d0 weight 256 via 192.0.2.1 dev d0 weight 1 lock 4 mtu 1400" },
+    { "route4/pw-022 corner: local default dev d0 table local proto static scope host src 192.0.2.10 metric 4294967295 mtu 1280: local, skipped",
+      "route4/pw-022", "table 255 local 0.0.0.0/0",
+      "none" },
+    { "route4/pw-023 boundary: default nhid 10 via 192.0.2.1 dev d0 table local proto 255",
+      "route4/pw-023", "table 255 0.0.0.0/0",
+      "k4l scan 0.0.0.0/0 alien proto 255 metric 0 unicast via 192.0.2.1 dev d0" },
+    { "route4/pw-024 corner: 128.0.0.0/1 via inet6 2001:db8:1::1 dev d0 table 100 proto unspec mtu lock 1400: proto unspec, skipped",
+      "route4/pw-024", "table 100 128.0.0.0/1",
+      "none" },
+    { "route4/pw-038 corner: throw default table 4294967295 scope host src 192.0.2.10 metric 7 mtu 1280: throw, skipped",
+      "route4/pw-038", "table 4294967295 0.0.0.0/0",
+      "none" },
+    { "route4/pw-046 corner: default dev d0 proto unspec scope link metric 1024 mtu lock 1400: proto unspec, skipped",
+      "route4/pw-046", "table 254 0.0.0.0/0",
+      "none" },
+    { "route4/pw-047 boundary: multicast 128.0.0.0/1 via 192.0.2.1 dev d0 table 256 metric 4294967295 mtu 1280: multicast, skipped",
+      "route4/pw-047", "table 256 multicast 128.0.0.0/1",
+      "none" },
+    { "route4/pw-057 boundary: 198.51.100.6/31 via 192.0.2.1 dev d0 table local metric 4294967295",
+      "route4/pw-057", "table 255 198.51.100.6/31",
+      "k4l scan 198.51.100.6/31 alien proto 3 metric 4294967295 unicast via 192.0.2.1 dev d0" },
+    { "route4/pw-061 corner: broadcast 198.51.100.7 dev d0 table 256 scope link mtu lock 1400: broadcast, skipped",
+      "route4/pw-061", "table 256 broadcast 198.51.100.7/32",
+      "none" },
+    { "route4/pw-064 corner: 203.0.113.0/24 via 192.0.2.1 dev d0 table local",
+      "route4/pw-064", "table 255 203.0.113.0/24",
+      "k4l scan 203.0.113.0/24 alien proto 3 metric 0 unicast via 192.0.2.1 dev d0" },
+    { "route4/pw-068 corner: default table local advmss 1300 nexthop via 192.0.2.1 dev d0 weight 1 nexthop via 192.0.2.2 dev d0 weight 256",
+      "route4/pw-068", "table 255 0.0.0.0/0",
+      "k4l scan 0.0.0.0/0 alien proto 3 metric 0 unicast via 192.0.2.2 dev d0 weight 256 via 192.0.2.1 dev d0 weight 1 advmss 1300" },
+    { "route6/ec-001 positive: 2001:db8:2::/64 dev d0 metric 1024 pref medium",
+      "route6/ec-001", "table 254 2001:db8:2::/64",
+      "k6 scan 2001:db8:2::/64 alien proto 3 metric 1024 unicast dev d0" },
+    { "route6/pw-001 corner: default via 2001:db8:1::1 dev d0 proto static src 2001:db8:1::10 metric 1024 expires 59sec mtu 1280 pref low: metric 0, which the kernel keeps as 1024 for IPv6",
+      "route6/pw-001", "table 254 ::/0",
+      "k6 scan ::/0 alien proto 4 metric 1024 unicast via 2001:db8:1::1 dev d0 prefsrc 2001:db8:1::10 mtu 1280" },
+    { "route6/bd-001 boundary: default dev d0 table local proto 255 metric 1024 pref medium: metric 0, which the kernel keeps as 1024 for IPv6",
+      "route6/bd-001", "table 255 ::/0",
+      "k6l scan ::/0 alien proto 255 metric 1024 unicast dev d0" },
+    { "route6/bd-002 boundary: 8000::/1 dev d0 table 256 proto 255 metric 4294967295 pref medium",
+      "route6/bd-002", "table 256 8000::/1",
+      "k6h scan 8000::/1 alien proto 255 metric 4294967295 unicast dev d0" },
+    { "route6/bd-003 boundary: 2001:db8:2::/127 dev d0 table 4294967295 proto 255 metric 1024 pref medium: metric 0, which the kernel keeps as 1024 for IPv6",
+      "route6/bd-003", "table 4294967295 2001:db8:2::/127",
+      "k6m scan 2001:db8:2::/127 alien proto 255 metric 1024 unicast dev d0" },
+    { "route6/bd-004 boundary: 2001:db8:2::7 dev d0 table local proto 255 metric 4294967295 pref medium",
+      "route6/bd-004", "table 255 2001:db8:2::7/128",
+      "k6l scan 2001:db8:2::7/128 alien proto 255 metric 4294967295 unicast dev d0" },
+    { "route6/ec-003 corner: local default via 2001:db8:1::1 dev d0 table 100 proto 255 metric 1024 mtu lock 1400 pref medium: local, skipped",
+      "route6/ec-003", "table 100 local ::/0",
+      "none" },
+    { "route6/ec-004 corner: anycast 8000::/1 via 2001:db8:3::1 dev d0 table local metric 4294967295 onlink advmss 1300 pref high: anycast, skipped",
+      "route6/ec-004", "table 255 8000::/1",
+      "none" },
+    { "route6/ec-006 boundary: blackhole 2001:db8:2::7 nhid 10 via 2001:db8:1::1 dev d0 table 4294967295 metric 1024 pref medium: the nexthop of a blackhole ignored",
+      "route6/ec-006", "table 4294967295 2001:db8:2::7/128",
+      "k6m scan 2001:db8:2::7/128 alien proto 3 metric 1024 blackhole" },
+    { "route6/ec-007 corner: unreachable ::ffff:198.51.100.0/120 dev lo metric 1024 pref medium: dev lo ignored",
+      "route6/ec-007", "table 254 ::ffff:198.51.100.0/120",
+      "k6 scan ::ffff:198.51.100.0/120 alien proto 3 metric 1024 unreachable" },
+    { "route6/ec-008 positive: prohibit 2001:db8:2::/64 dev lo metric 1024 pref medium: dev lo ignored",
+      "route6/ec-008", "table 254 2001:db8:2::/64",
+      "k6 scan 2001:db8:2::/64 alien proto 3 metric 1024 prohibit" },
+    { "route6/ec-009 positive: throw 2001:db8:2::/64 dev lo metric 1024 pref medium: throw, skipped",
+      "route6/ec-009", "table 254 2001:db8:2::/64",
+      "none" },
+    { "route6/pw-004 corner: multicast 2001:db8:2::/127 table 256 metric 7 mtu 1280 pref low nexthop via 2001:db8:1::1 dev d0 weight 1 nexthop via 2001:db8:1::2 dev d0 weight 256: multicast, skipped",
+      "route6/pw-004", "table 256 multicast 2001:db8:2::/127",
+      "none" },
+    { "route6/pw-008 corner: default table local proto static src 2001:db8:1::10 metric 1024 expires 59sec pref medium nexthop via 2001:db8:1::1 dev d0 weight 1 nexthop via 2001:db8:1::2 dev d0 weight 256",
+      "route6/pw-008", "table 255 ::/0",
+      "k6l scan ::/0 alien proto 4 metric 1024 unicast via 2001:db8:1::2 dev d0 weight 256 via 2001:db8:1::1 dev d0 weight 1 prefsrc 2001:db8:1::10" },
+    { "route6/pw-012 corner: multicast 2001:db8:2::7 dev d0 src 2001:db8:1::10 metric 1024 advmss 1300 pref low: multicast, skipped",
+      "route6/pw-012", "table 254 multicast 2001:db8:2::7/128",
+      "none" },
+    { "route6/pw-016 boundary: default via 2001:db8:1::1 dev d0 proto 255 src 2001:db8:1::10 metric 4294967295 advmss 1300 pref medium",
+      "route6/pw-016", "table 254 ::/0",
+      "k6 scan ::/0 alien proto 255 metric 4294967295 unicast via 2001:db8:1::1 dev d0 prefsrc 2001:db8:1::10 advmss 1300" },
+    { "route6/pw-017 corner: 8000::/1 dev d0 proto static src 2001:db8:1::10 metric 7 expires 59sec pref medium",
+      "route6/pw-017", "table 254 8000::/1",
+      "k6 scan 8000::/1 alien proto 4 metric 7 unicast dev d0 prefsrc 2001:db8:1::10" },
+    { "route6/pw-020 corner: multicast ::ffff:198.51.100.0/120 nhid 10 via 2001:db8:1::1 dev d0 proto static metric 1024 expires 59sec mtu lock 1400 pref high: multicast, skipped",
+      "route6/pw-020", "table 254 multicast ::ffff:198.51.100.0/120",
+      "none" },
+    { "route6/pw-024 corner: 8000::/1 via 2001:db8:1::1 dev d0 table 100 metric 1024 pref low: proto 0, which the kernel keeps as boot (3) for IPv6",
+      "route6/pw-024", "table 100 8000::/1",
+      "k6v scan 8000::/1 alien proto 3 metric 1024 unicast via 2001:db8:1::1 dev d0" },
+    { "route6/pw-041 corner: multicast default dev d0 metric 1024 advmss 1300 pref medium: multicast, skipped",
+      "route6/pw-041", "table 254 multicast ::/0",
+      "none" },
+    { "route6/pw-057 boundary: 2001:db8:2::7 via 2001:db8:3::1 dev d0 metric 1024 onlink mtu 1280 pref medium",
+      "route6/pw-057", "table 254 2001:db8:2::7/128",
+      "k6 scan 2001:db8:2::7/128 alien proto 3 metric 1024 unicast via 2001:db8:3::1 dev d0 onlink mtu 1280" },
+    { "route6/pw-061 corner: ::ffff:198.51.100.0/120 via 2001:db8:1::1 dev d0 table 100 metric 4294967295 mtu lock 1400 pref medium",
+      "route6/pw-061", "table 100 ::ffff:198.51.100.0/120",
+      "k6v scan ::ffff:198.51.100.0/120 alien proto 3 metric 4294967295 unicast via 2001:db8:1::1 dev d0 lock 4 mtu 1400" },
+    { "route6/pw-062 corner: ::ffff:198.51.100.0/120 dev d0 table local metric 1024 pref medium",
+      "route6/pw-062", "table 255 ::ffff:198.51.100.0/120",
+      "k6l scan ::ffff:198.51.100.0/120 alien proto 3 metric 1024 unicast dev d0" },
+    { "route6/pw-065 corner: default via 2001:db8:3::1 dev d0 metric 7 onlink pref medium",
+      "route6/pw-065", "table 254 ::/0",
+      "k6 scan ::/0 alien proto 3 metric 7 unicast via 2001:db8:3::1 dev d0 onlink" },
+    { "route6/pw-067 boundary: default nhid 10 via 2001:db8:1::1 dev d0 table 4294967295 proto 255 metric 1024 pref medium",
+      "route6/pw-067", "table 4294967295 ::/0",
+      "k6m scan ::/0 alien proto 255 metric 1024 unicast via 2001:db8:1::1 dev d0" },
+    { "route6/pw-069 boundary: 8000::/1 metric 1024 advmss 1300 pref high nexthop via 2001:db8:1::1 dev d0 weight 1 nexthop via 2001:db8:1::2 dev d0 weight 256",
+      "route6/pw-069", "table 254 8000::/1",
+      "k6 scan 8000::/1 alien proto 3 metric 1024 unicast via 2001:db8:1::2 dev d0 weight 256 via 2001:db8:1::1 dev d0 weight 1 advmss 1300" },
+    { "route6/pw-071 boundary: 2001:db8:2::7 metric 1024 pref medium nexthop via 2001:db8:1::1 dev d0 weight 1 nexthop via 2001:db8:1::2 dev d0 weight 256",
+      "route6/pw-071", "table 254 2001:db8:2::7/128",
+      "k6 scan 2001:db8:2::7/128 alien proto 3 metric 1024 unicast via 2001:db8:1::2 dev d0 weight 256 via 2001:db8:1::1 dev d0 weight 1" },
+    { "route6/pw-072 boundary: 2001:db8:2::/64 dev d0 table 256 metric 1024 pref medium",
+      "route6/pw-072", "table 256 2001:db8:2::/64",
+      "k6h scan 2001:db8:2::/64 alien proto 3 metric 1024 unicast dev d0" },
+    { "route6/rn1-003 boundary: 2001:db8:2::/64 via 2001:db8:1::1 dev d0 proto 255 metric 1024 pref low",
+      "route6/rn1-003", "table 254 2001:db8:2::/64",
+      "k6 scan 2001:db8:2::/64 alien proto 255 metric 1024 unicast via 2001:db8:1::1 dev d0" },
+    { "route6/rn1-009 corner: 2001:db8:2::/64 nhid 10 via 2001:db8:1::1 dev d0 src 2001:db8:1::10 metric 4294967295 expires 59sec pref medium: proto 0, which the kernel keeps as boot (3) for IPv6",
+      "route6/rn1-009", "table 254 2001:db8:2::/64",
+      "k6 scan 2001:db8:2::/64 alien proto 3 metric 4294967295 unicast via 2001:db8:1::1 dev d0 prefsrc 2001:db8:1::10" },
+    { "route6/rn1-015 corner: default via 2001:db8:1::1 dev d0 table 256 src 2001:db8:1::10 metric 1024 pref medium: proto 0, which the kernel keeps as boot (3) for IPv6",
+      "route6/rn1-015", "table 256 ::/0",
+      "k6h scan ::/0 alien proto 3 metric 1024 unicast via 2001:db8:1::1 dev d0 prefsrc 2001:db8:1::10" },
+    { "route6/rn1-022 corner: 2001:db8:2::/127 proto 255 metric 1024 mtu 1280 pref medium nexthop via 2001:db8:1::1 dev d0 weight 1 nexthop via 2001:db8:1::2 dev d0 weight 256",
+      "route6/rn1-022", "table 254 2001:db8:2::/127",
+      "k6 scan 2001:db8:2::/127 alien proto 255 metric 1024 unicast via 2001:db8:1::2 dev d0 weight 256 via 2001:db8:1::1 dev d0 weight 1 mtu 1280" },
+  };
+
+  nl_test_ws_setup();
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture routes;
+    char name[128];
+
+    bsnprintf(name, sizeof(name), NL_TEST_WS "%s/netlink_route_dump.pcap", cases[i].row);
+    nl_test_load(&routes, name);
+    nl_test_parse_route(nl_test_find_route(&routes, cases[i].key), 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+    nl_test_free(&routes);
+  }
+
+  nl_test_ws_cleanup();
+
+  return 1;
+}
+
+/*
+ *	Notifications
+ */
+
+#define NL_TEST_MONITOR_CONFIG						\
+  "router id 192.0.2.10;\n"						\
+  "ipv4 table t4l; ipv6 table t6l;\n"					\
+  "protocol device { scan time 86400; }\n"				\
+  "protocol kernel k4 { ipv4 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k6 { ipv6 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k4l { ipv4 { table t4l; import all; }; kernel table 255; learn all; scan time 86400; }\n" \
+  "protocol kernel k6l { ipv6 { table t6l; import all; }; kernel table 255; learn all; scan time 86400; }\n"
+
+/*
+ * xtcp2's link-write rtnl/monitor_all row (see README): "ip monitor all"
+ * while ip(8) changed links and added addresses, routes and more. The
+ * capture starts with ip's own link dump (lo, nlmon0, c0 3, d0 4, r0p 5 and
+ * r0 6), which asked for names only, so BIRD takes each link as malformed
+ * and knows none of them. Then the notifications, which have sequence
+ * number 0 (the rest are replies to ip's requests), go through
+ * nl_async_msg() as they arrived:
+ *
+ *   inet 224.0.0.250/32 autojoin dev c0, its local route
+ *   d0 up (a full link message), multicast ff00::/8 dev d0 table local
+ *   2001:db8:1::/64 dev d0 proto kernel, inet6 2001:db8:1::1/64 nodad dev
+ *     d0, its local and anycast routes
+ *   netconf, rule, nexthop, stats, nsid (ignored)
+ *   2001:db8:5::/64 dev r0 proto kernel expires 600, from a router advert
+ */
+static int
+t_parse_monitor(void)
+{
+  static const struct {
+    const char *description;
+    const char *name;		/* Interface, NULL for the routes */
+    int addrs;			/* Its addresses rather than itself */
+    const char *expected;
+  } cases[] = {
+    { "c0, only in the dump of names, malformed (negative)", "c0", 0,
+      "none" },
+    { "c0 224.0.0.250/32 autojoin, for an interface BIRD does not know (negative)", "c0", 1,
+      "none" },
+    { "r0, only in the dump of names, malformed (negative)", "r0", 0,
+      "none" },
+    { "d0, created by its notification when set up (positive)", "d0", 0,
+      "d0 index 4 mtu 1500 admin-up link-up multiaccess broadcast multicast lladdr ee:fb:d3:3c:22:c8" },
+    { "d0 2001:db8:1::1/64 nodad, by notification (positive)", "d0", 1,
+      "2001:db8:1::1 net 2001:db8:1::/64 scope univ primary" },
+    { "routes: 2001:db8:1::/64 learned; local, multicast and anycast ones skipped; "
+      "2001:db8:5::/64 of the unknown r0 dropped", NULL, 0,
+      "k6 add 2001:db8:1::/64 kernel proto 2 metric 256 unicast dev d0" },
+  };
+
+  struct nl_test_capture c;
+
+  bt_assert_msg(bt_config_parse(NL_TEST_MONITOR_CONFIG), "Monitor test config");
+  nl_test_pump();
+  nl_test_load(&c, "rtnl/monitor_all/ip.pcap");
+
+  /* The dump, up to its NLMSG_DONE */
+  uint n = 0;
+  for (; (n < c.count) && (c.msg[n]->nlmsg_type != NLMSG_DONE); n++)
+    nl_parse_link(c.msg[n], 0);
+
+  nl_test_routes_reset();
+  for (uint i = n; i < c.count; i++)
+    if (!c.msg[i]->nlmsg_seq)
+      nl_async_msg(c.msg[i]);
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct iface *ifi = cases[i].name ? if_find_by_name(cases[i].name) : NULL;
+
+    if (!cases[i].name)
+      nl_test_check_routes(cases[i].description, cases[i].expected);
+    else if (cases[i].addrs)
+      nl_test_check_addrs(cases[i].description, ifi, cases[i].expected);
+    else
+      nl_test_check_iface(cases[i].description, ifi, cases[i].expected);
+  }
+
+  /* Gone again, for the next suites' links of the same names */
+  for (uint i = c.count; i--; )
+    if (!c.msg[i]->nlmsg_seq && (c.msg[i]->nlmsg_type == RTM_NEWADDR))
+    {
+      c.msg[i]->nlmsg_type = RTM_DELADDR;
+      nl_parse_addr(c.msg[i], 0);
+    }
+
+  for (uint i = 0; i < n; i++)
+  {
+    c.msg[i]->nlmsg_type = RTM_DELLINK;
+    nl_parse_link(c.msg[i], 0);
+  }
+
+  nl_test_free(&c);
+
+  return 1;
+}
+
+
+/*
+ *	Errors
+ */
+
+/* nl_error() logs what the kernel refused with; record it instead */
+static char nl_test_log[256];
+
+void
+nl_test_log_rl(struct tbf *rl UNUSED, const char *msg, ...)
+{
+  va_list args;
+  va_start(args, msg);
+
+  /* Skip the log class */
+  if ((msg[0] > 0) && (msg[0] < ' '))
+    msg++;
+
+  bvsnprintf(nl_test_log, sizeof(nl_test_log), msg, args);
+  va_end(args);
+}
+
+/* The kernel's answer to the request of a ws row: its last NLMSG_ERROR */
+static struct nlmsghdr *
+nl_test_find_error(struct nl_test_capture *c)
+{
+  for (int i = c->count - 1; i >= 0; i--)
+    if (c->msg[i]->nlmsg_type == NLMSG_ERROR)
+      return c->msg[i];
+
+  bt_abort_msg("No error message in the capture");
+  return NULL;
+}
+
+static const char *
+nl_test_errno_name(int err)
+{
+  switch (err)
+  {
+  case 0:		return "0";
+  case ENOENT:		return "ENOENT";
+  case ESRCH:		return "ESRCH";
+  case ENOBUFS:		return "ENOBUFS";
+  case EEXIST:		return "EEXIST";
+  case ENODEV:		return "ENODEV";
+  case EINVAL:		return "EINVAL";
+  case ENETUNREACH:	return "ENETUNREACH";
+  default:		return "?";
+  }
+}
+
+#define NL_ERR_ONLY_HEADER	1	/* Cut after struct nlmsgerr's own header */
+#define NL_ERR_SHORT		2	/* Cut before the end of struct nlmsgerr */
+
+/*
+ * The kernel's answers to the ip commands of xtcp2's ws rows (see README),
+ * from each row's ip.pcap: an acknowledgement, or an error with the request
+ * and, from the extended ACK, a message, as ip printed it. The kernel sends
+ * NLM_F_ACK_TLVS with the full request, as ip does not ask for capped
+ * acknowledgements. The cut rows are shortened copies, which the kernel
+ * never sends.
+ */
+static int
+t_parse_error(void)
+{
+  static const struct {
+    const char *description;
+    const char *row;		/* ws row, see README */
+    int ignore_esrch;
+    int cut;
+    const char *expected;	/* errno, then what was logged */
+  } cases[] = {
+    /* Acknowledgements */
+    { "route4/ec-001 positive: ip -4 route add 198.51.100.0/24 dev d0, acknowledged",
+      "route4/ec-001", 0, 0, "0 none" },
+    { "route6/ec-001 positive: ip -6 route add 2001:db8:2::/64 dev d0, acknowledged",
+      "route6/ec-001", 0, 0, "0 none" },
+
+    /* Errors with a message */
+    { "route4/ec-005 negative: ip -4 route del ... table 256: Error: FIB table does not exist.",
+      "route4/ec-005", 0, 0, "ESRCH Netlink: FIB table does not exist" },
+    { "route4/ec-005 with ESRCH ignored: a delete from a table that is gone is not logged (corner)",
+      "route4/ec-005", 1, 0, "ESRCH none" },
+    { "route6/gone-1 negative: ip -6 route del ... table 256: Error: FIB table does not exist.",
+      "route6/gone-1", 0, 0, "ESRCH Netlink: FIB table does not exist" },
+    { "route4/ng-001 negative: ip -4 route add blackhole 198.51.100.0/24 dev d0: Error: Gateway, device and multipath can not be specified for this route type.",
+      "route4/ng-001", 0, 0, "EINVAL Netlink: Gateway, device and multipath can not be specified for this route type" },
+    { "route4/ng-038 negative: ip -4 route add 198.51.100.1/24 dev d0: Error: Invalid prefix for given prefix length.",
+      "route4/ng-038", 0, 0, "EINVAL Netlink: Invalid prefix for given prefix length" },
+    { "route4/ng-030 negative: ip -4 route add local 198.51.100.0/24 scope global dev d0: Error: Invalid scope.",
+      "route4/ng-030", 0, 0, "EINVAL Netlink: Invalid scope" },
+    { "route4/pw-016 negative: ip -4 route append 0.0.0.0/0 ... scope link ... via 192.0.2.1: Error: Nexthop has invalid gateway.",
+      "route4/pw-016", 0, 0, "ENETUNREACH Netlink: Nexthop has invalid gateway" },
+    { "route4/ec-004 negative: ip -4 route prepend broadcast 128.0.0.0/1 ... via 203.0.113.1 dev d0 onlink: Error: Nexthop has invalid scope.",
+      "route4/ec-004", 0, 0, "EINVAL Netlink: Nexthop has invalid scope" },
+    { "route4/ec-003 negative: ip -4 route append local 0.0.0.0/0 ... scope host ... via 192.0.2.1 dev d0: Error: Route with host scope can not have a gateway.",
+      "route4/ec-003", 0, 0, "EINVAL Netlink: Route with host scope can not have a gateway" },
+    { "route4/pw-010 negative: ip -4 route replace local 128.0.0.0/1 ... scope host ... nexthop ... nexthop ...: Error: Route with host scope can not have multiple nexthops.",
+      "route4/pw-010", 0, 0, "EINVAL Netlink: Route with host scope can not have multiple nexthops" },
+    { "route6/ng-014 negative: ip -6 route add 2001:db8:2::/64 via inet 192.0.2.1 dev d0: Error: IPv6 does not support RTA_VIA attribute.",
+      "route6/ng-014", 0, 0, "EINVAL Netlink: IPv6 does not support RTA_VIA attribute" },
+
+    /* Errors without a message */
+    { "route4/dup-1 negative: ip -4 route add 198.51.100.0/24 dev d0 again: RTNETLINK answers: File exists",
+      "route4/dup-1", 0, 0, "EEXIST Netlink: File exists" },
+    { "route6/dup-1 negative: ip -6 route add 2001:db8:2::/64 dev d0 again: RTNETLINK answers: File exists",
+      "route6/dup-1", 0, 0, "EEXIST Netlink: File exists" },
+    { "route4/ng-025 negative: ip -4 route add 198.51.100.0/24, no device: RTNETLINK answers: No such device",
+      "route4/ng-025", 0, 0, "ENODEV Netlink: No such device" },
+    { "route6/ng-001 negative: ip -6 route add 2001:db8:2::/64, no device: RTNETLINK answers: No such device",
+      "route6/ng-001", 0, 0, "ENODEV Netlink: No such device" },
+    { "route4/gone-3 negative: ip -4 route del unreachable 0.0.0.0/0 ... nhid 10, no such route: RTNETLINK answers: No such process",
+      "route4/gone-3", 0, 0, "ESRCH Netlink: No such process" },
+    { "route6/gone-3 negative: ip -6 route del prohibit 8000::/1 ... nhid 10, no such route: RTNETLINK answers: No such process",
+      "route6/gone-3", 0, 0, "ESRCH Netlink: No such process" },
+    { "route4/gone-3 with ESRCH ignored, as for deletes of routes already gone (corner)",
+      "route4/gone-3", 1, 0, "ESRCH none" },
+    { "route6/gone-3 with ESRCH ignored, as for deletes of routes already gone (corner)",
+      "route6/gone-3", 1, 0, "ESRCH none" },
+    { "route4/dup-1 with ESRCH ignored, another error still logged (corner)",
+      "route4/dup-1", 1, 0, "EEXIST Netlink: File exists" },
+
+    /* Cut short */
+    { "route4/ng-030 cut after the request's header, its attributes missing though not capped (negative)",
+      "route4/ng-030", 0, NL_ERR_ONLY_HEADER, "EINVAL none" },
+    { "route6/ng-014 cut after the request's header, its attributes missing though not capped (negative)",
+      "route6/ng-014", 0, NL_ERR_ONLY_HEADER, "EINVAL none" },
+    { "route4/ng-030 cut before the end of struct nlmsgerr (negative)",
+      "route4/ng-030", 0, NL_ERR_SHORT, "ENOBUFS none" },
+    { "route4/ec-001 acknowledgement cut before the end of struct nlmsgerr (negative)",
+      "route4/ec-001", 0, NL_ERR_SHORT, "ENOBUFS none" },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture c;
+    char name[128], got[384];
+
+    bsnprintf(name, sizeof(name), NL_TEST_WS "%s/ip.pcap", cases[i].row);
+    nl_test_load(&c, name);
+
+    struct nlmsghdr *h = nl_test_find_error(&c);
+    if (cases[i].cut == NL_ERR_ONLY_HEADER)
+      h->nlmsg_len = NLMSG_LENGTH(sizeof(struct nlmsgerr));
+    else if (cases[i].cut == NL_ERR_SHORT)
+      h->nlmsg_len = NLMSG_LENGTH(sizeof(struct nlmsgerr)) - 1;
+
+    bsnprintf(nl_test_log, sizeof(nl_test_log), "none");
+    int err = nl_error(h, cases[i].ignore_esrch);
+    bsnprintf(got, sizeof(got), "%s %s", nl_test_errno_name(err), nl_test_log);
+
+    bt_assert_msg(!strcmp(got, cases[i].expected), "%s: got \"%s\", expected \"%s\"",
+		  cases[i].description, got, cases[i].expected);
+    nl_test_free(&c);
+  }
+
+  return 1;
+}
 
 #ifdef CONFIG_BRIDGE
 
@@ -2781,11 +3633,17 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_link_capture, "Links from a captured link dump");
   bt_test_suite(t_parse_link_changed, "Links with one attribute changed");
   bt_test_suite(t_parse_link_update, "Changes to known links");
+  bt_test_suite(t_parse_link_kinds, "Links of other kinds from captures");
   bt_test_suite(t_parse_addr_capture, "Addresses from a captured address dump");
   bt_test_suite(t_parse_addr_changed, "Addresses with one field or attribute changed");
+  bt_test_suite(t_parse_addr_show, "Addresses of the addr-show captures");
   bt_test_suite(t_parse_route_capture, "Routes from a captured route dump");
+  bt_test_suite(t_parse_route_sadr, "Routes from a captured route dump on a SADR channel");
   bt_test_suite(t_parse_route_changed, "Routes with one field or attribute changed");
   bt_test_suite(t_parse_route_multipath, "Multipath routes");
+  bt_test_suite(t_parse_route_matrix, "Routes from the ip route matrix captures");
+  bt_test_suite(t_parse_monitor, "Notifications of the ip monitor capture");
+  bt_test_suite(t_parse_error, "Kernel acknowledgements and errors from the ip route matrix captures");
 #ifdef HAVE_MPLS_KERNEL
   bt_test_suite(t_parse_mpls_capture, "MPLS routes and MPLS encapsulation from captures");
   bt_test_suite(t_parse_mpls_event, "MPLS route notifications from a capture");
