@@ -38,6 +38,34 @@ Its routes, besides the connected and local ones:
   2001:db8:2::/64 nexthop via 2001:db8::2 weight 1 nexthop via 2001:db8::3 weight 3
   2001:db8:4::/64 from 2001:db8:5::/64 dev goip0
 
+brmpls/<row>/ holds the MPLS captures, copied unchanged from xtcp2's
+link-write corpus, commit 70fc28d6
+(pkg/xtcpnl/testdata/7_3_0/link-write/brmpls/<row>/), same VM. Each row
+runs in a fresh namespace: lo 1, nlmon0 2, then the row's devices, here a
+dummy interface d0 (192.0.2.1/24, 2001:db8::1/64), with MPLS input
+enabled and platform_labels 1000. After its command, each row read back
+its namespace's links and addresses ("ip -d link show" and "ip addr show",
+netlink_route_getlink.pcap and netlink_route_getaddr.pcap), which the
+test loads first.
+
+  mpls_route_show/ip.pcap, "ip -f mpls route show":
+    100 as to 200/300 via inet 192.0.2.10 dev d0
+    101 via inet 192.0.2.10 dev d0
+    102 nexthop as to 201 via inet 192.0.2.10 dev d0
+        nexthop as to 202 via inet 192.0.2.11 dev d0
+  mpls_route_add_via6/netlink_route_getroute_mpls.pcap,
+  "ip -f mpls route show" after the add:
+    103 as to 203 via inet6 2001:db8::10 dev d0
+  route_encap_show/ip.pcap, "ip route show dev d0":
+    198.18.20.0/24 encap mpls 100/200 via 192.0.2.10
+    198.18.21.0/24 nexthop encap mpls 101 via 192.0.2.10
+                   nexthop encap mpls 102 via 192.0.2.11
+  route_encap_show/netlink_route_getroute6.pcap, "ip -6 route show dev d0":
+    2001:db8:20::/64 encap mpls 300 via 2001:db8::10
+  mpls_event/ip.pcap, "ip monitor route" while 104 as to 204 and
+  198.18.23.0/24 encap mpls 105 are added and deleted; here a dummy
+  interface c0 comes first, so d0 is index 4
+
 Netlink messages are in host byte order, so the tests of the captures
 are skipped on big-endian hosts.
 

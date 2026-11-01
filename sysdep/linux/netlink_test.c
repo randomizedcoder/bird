@@ -944,6 +944,9 @@ nl_test_record_route(struct krt_proto *p, rte *e, const char *mode, s8 src)
 
       nl_test_routes_add(" dev %s", nh->iface ? nh->iface->name : "?");
 
+      for (uint l = 0; l < nh->labels; l++)
+	nl_test_routes_add("%s%u", l ? "/" : " labels ", nh->label[l]);
+
       if (a->nh.next)
 	nl_test_routes_add(" weight %u", nh->weight + 1);
 
@@ -998,8 +1001,13 @@ nl_test_route_key(struct nlmsghdr *h, char *buf, uint size)
 
   if (r->rtm_family == AF_INET)
     net_fill_ip4(&n, a ? rta_get_ip4(a) : IP4_NONE, r->rtm_dst_len);
-  else
+  else if (r->rtm_family == AF_INET6)
     net_fill_ip6(&n, a ? rta_get_ip6(a) : IP6_NONE, r->rtm_dst_len);
+  else
+  {
+    u32 stack[MPLS_MAX_LABEL_STACK];
+    net_fill_mpls(&n, (a && (mpls_get(RTA_DATA(a), RTA_PAYLOAD(a), stack) > 0)) ? stack[0] : 0);
+  }
 
   /* Keep local and broadcast routes apart from unicast ones */
   const char *type = (r->rtm_type == RTN_LOCAL) ? "local " :
@@ -1029,13 +1037,10 @@ nl_test_find_route(struct nl_test_capture *c, const char *key)
 }
 
 /* Kernel protocols up, the captured links and addresses known */
+/* Run the events a new configuration queued, which start the protocols */
 static void
-nl_test_route_setup(void)
+nl_test_pump(void)
 {
-  struct nl_test_capture links, addrs;
-
-  bt_assert_msg(bt_config_parse(NL_TEST_ROUTE_CONFIG), "Route test config");
-
   for (int i = 0; i < 256; i++)
   {
     if (EMPTY_LIST(global_event_list) && EMPTY_LIST(global_work_list))
@@ -1044,6 +1049,15 @@ nl_test_route_setup(void)
     ev_run_list(&global_event_list);
     ev_run_list(&global_work_list);
   }
+}
+
+static void
+nl_test_route_setup(void)
+{
+  struct nl_test_capture links, addrs;
+
+  bt_assert_msg(bt_config_parse(NL_TEST_ROUTE_CONFIG), "Route test config");
+  nl_test_pump();
 
   nl_test_load_links(&links);
   nl_test_load(&addrs, "addr-dump.pcap");
@@ -1626,6 +1640,174 @@ t_parse_route_multipath(void)
 }
 
 
+#ifdef HAVE_MPLS_KERNEL
+
+/*
+ *	MPLS
+ */
+
+/* The MPLS captures come from xtcp2's brmpls rows, each a namespace with
+ * a dummy interface d0 (192.0.2.1/24, 2001:db8::1/64). Every row read
+ * back its namespace's links and addresses after its command. */
+#define NL_TEST_MPLS_CONFIG						\
+  "router id 192.0.2.1;\n"						\
+  "mpls domain mdom;\n"							\
+  "mpls table mtab;\n"							\
+  "protocol device { scan time 86400; }\n"				\
+  "protocol kernel k4 { ipv4 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k6 { ipv6 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel km { mpls { table mtab; import all; }; learn all; scan time 86400; }\n"
+
+#define NL_TEST_BRMPLS "brmpls/"
+
+/* The links and addresses of a brmpls row's namespace */
+static void
+nl_test_load_ns(const char *row)
+{
+  struct nl_test_capture links, addrs;
+  char name[128];
+
+  bsnprintf(name, sizeof(name), NL_TEST_BRMPLS "%s/netlink_route_getlink.pcap", row);
+  nl_test_load(&links, name);
+  for (uint i = 0; i < links.count; i++)
+    if (links.msg[i]->nlmsg_type == RTM_NEWLINK)
+      nl_parse_link(links.msg[i], 0);
+
+  bsnprintf(name, sizeof(name), NL_TEST_BRMPLS "%s/netlink_route_getaddr.pcap", row);
+  nl_test_load(&addrs, name);
+  for (uint i = 0; i < addrs.count; i++)
+    if (addrs.msg[i]->nlmsg_type == RTM_NEWADDR)
+      nl_parse_addr(addrs.msg[i], 0);
+
+  nl_test_free(&links);
+  nl_test_free(&addrs);
+}
+
+static void
+nl_test_mpls_setup(void)
+{
+  bt_assert_msg(bt_config_parse(NL_TEST_MPLS_CONFIG), "MPLS test config");
+  nl_test_pump();
+}
+
+/* The routes of the MPLS captures, as `ip route show` printed them */
+static int
+t_parse_mpls_capture(void)
+{
+  static const struct {
+    const char *description;
+    const char *row;		/* brmpls row, see README */
+    const char *capture;
+    const char *key;		/* See nl_test_route_key() */
+    const char *expected;
+  } cases[] = {
+    { "100 as to 200/300 via inet 192.0.2.10 dev d0",
+      "mpls_route_show", "ip.pcap", "table 254 100",
+      "km scan 100 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 200/300" },
+    { "101 via inet 192.0.2.10 dev d0",
+      "mpls_route_show", "ip.pcap", "table 254 101",
+      "km scan 101 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0" },
+    { "102 nexthop as to 201 via inet 192.0.2.10 dev d0 nexthop as to 202 via inet 192.0.2.11 dev d0",
+      "mpls_route_show", "ip.pcap", "table 254 102",
+      "km scan 102 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 201 weight 1 via 192.0.2.11 dev d0 labels 202 weight 1" },
+    { "103 as to 203 via inet6 2001:db8::10 dev d0",
+      "mpls_route_add_via6", "netlink_route_getroute_mpls.pcap", "table 254 103",
+      "km scan 103 alien proto 3 metric 0 unicast via 2001:db8::10 dev d0 labels 203" },
+    { "192.0.2.0/24 proto kernel scope link src 192.0.2.1",
+      "route_encap_show", "ip.pcap", "table 254 192.0.2.0/24",
+      "k4 scan 192.0.2.0/24 kernel proto 2 metric 0 unicast dev d0 scope 253 prefsrc 192.0.2.1" },
+    { "198.18.20.0/24 encap mpls 100/200 via 192.0.2.10",
+      "route_encap_show", "ip.pcap", "table 254 198.18.20.0/24",
+      "k4 scan 198.18.20.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 100/200" },
+    { "198.18.21.0/24 nexthop encap mpls 101 via 192.0.2.10 dev d0 weight 1 nexthop encap mpls 102 via 192.0.2.11 dev d0 weight 1",
+      "route_encap_show", "ip.pcap", "table 254 198.18.21.0/24",
+      "k4 scan 198.18.21.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 101 weight 1 via 192.0.2.11 dev d0 labels 102 weight 1" },
+    { "2001:db8::/64 proto kernel metric 256",
+      "route_encap_show", "netlink_route_getroute6.pcap", "table 254 2001:db8::/64",
+      "k6 scan 2001:db8::/64 kernel proto 2 metric 256 unicast dev d0" },
+    { "2001:db8:20::/64 encap mpls 300 via 2001:db8::10 metric 1024",
+      "route_encap_show", "netlink_route_getroute6.pcap", "table 254 2001:db8:20::/64",
+      "k6 scan 2001:db8:20::/64 alien proto 3 metric 1024 unicast via 2001:db8::10 dev d0 labels 300" },
+  };
+
+  nl_test_mpls_setup();
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture routes;
+    char name[128];
+
+    bsnprintf(name, sizeof(name), NL_TEST_BRMPLS "%s/%s", cases[i].row, cases[i].capture);
+    nl_test_load_ns(cases[i].row);
+    nl_test_load(&routes, name);
+    nl_test_parse_route(nl_test_find_route(&routes, cases[i].key), 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+    nl_test_free(&routes);
+  }
+
+  /* Every route of the dumps has a case */
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture routes;
+    char name[128];
+
+    if (i && !strcmp(cases[i].row, cases[i - 1].row) && !strcmp(cases[i].capture, cases[i - 1].capture))
+      continue;
+
+    bsnprintf(name, sizeof(name), NL_TEST_BRMPLS "%s/%s", cases[i].row, cases[i].capture);
+    nl_test_load(&routes, name);
+    for (uint j = 0; j < routes.count; j++)
+    {
+      char key[128];
+      if (routes.msg[j]->nlmsg_type != RTM_NEWROUTE)
+	continue;
+
+      nl_test_route_key(routes.msg[j], key, sizeof(key));
+
+      int found = 0;
+      for (uint k = 0; k < ARRAY_SIZE(cases); k++)
+	found |= !strcmp(cases[k].row, cases[i].row) && !strcmp(cases[k].capture, cases[i].capture) &&
+	  !strcmp(cases[k].key, key);
+
+      bt_assert_msg(found, "No case for route %s of %s", key, name);
+    }
+    nl_test_free(&routes);
+  }
+
+  return 1;
+}
+
+/* The notifications `ip monitor route` saw for routes added and deleted
+ * with ip(8), in a namespace where d0 is at index 4, after c0 */
+static int
+t_parse_mpls_event(void)
+{
+  struct nl_test_capture events;
+
+  nl_test_mpls_setup();
+  nl_test_load_ns("mpls_event");
+  nl_test_load(&events, NL_TEST_BRMPLS "mpls_event/ip.pcap");
+
+  struct nl_parse_state s = { .pool = nl_linpool };
+  nl_test_routes_reset();
+
+  for (uint i = 0; i < events.count; i++)
+    if ((events.msg[i]->nlmsg_type == RTM_NEWROUTE) || (events.msg[i]->nlmsg_type == RTM_DELROUTE))
+      nl_parse_route(&s, events.msg[i]);
+
+  nl_test_check_routes("104 as to 204 and 198.18.23.0/24 encap mpls 105, each added and deleted",
+			"km add 104 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 204; "
+			"km del 104 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 204; "
+			"k4 add 198.18.23.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 105; "
+			"k4 del 198.18.23.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 105");
+  nl_test_free(&events);
+
+  return 1;
+}
+
+#endif
+
+
 int
 main(int argc, char *argv[])
 {
@@ -1647,6 +1829,10 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_route_capture, "Routes from a captured route dump");
   bt_test_suite(t_parse_route_changed, "Routes with one field or attribute changed");
   bt_test_suite(t_parse_route_multipath, "Multipath routes");
+#ifdef HAVE_MPLS_KERNEL
+  bt_test_suite(t_parse_mpls_capture, "MPLS routes and MPLS encapsulation from captures");
+  bt_test_suite(t_parse_mpls_event, "MPLS route notifications from a capture");
+#endif
 
   return bt_exit_value();
 }
