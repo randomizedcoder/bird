@@ -377,6 +377,10 @@ rip_check_authentication(struct rip_proto *p, struct rip_iface *ifa, struct rip_
     if (data_len + auth_len2 != *plen)
       DROP("packet length mismatch", *plen);
 
+    /* The trailer follows the authentication entry and whole route entries */
+    if ((data_len < hdr_len + RIP_BLOCK_LENGTH) || ((data_len - hdr_len) % RIP_BLOCK_LENGTH))
+      DROP("packet length mismatch", data_len);
+
     /* Warning: two interpretations of auth_len field */
     if ((auth->auth_len != auth_len) && (auth->auth_len != auth_len2))
       DROP("wrong authentication length", auth->auth_len);

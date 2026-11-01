@@ -209,28 +209,28 @@ t_check_authentication(void)
       "1 plen 24" },
     { "packet_len 4, the trailer on the authentication entry (boundary)",
       0, 0, 0, 0, 0, 0, 7, 0, RIP_TEST_PKT_LEN, 4,
-      "0 plen 24 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - authentication trailer is missing (0)" },
+      "0 plen 24 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - packet length mismatch (4)" },
     { "packet_len 20, the trailer inside the authentication entry (boundary)",
       0, 0, 0, 0, 0, 0, 7, 0, RIP_TEST_PKT_LEN, 20,
-      "0 plen 40 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - authentication trailer is missing (0)" },
+      "0 plen 40 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - packet length mismatch (20)" },
     { "packet_len 0, too short for the authentication entry (boundary)",
       0, 0, 0, 0, 0, 0, 7, 0, RIP_TEST_PKT_LEN, 0,
       "0 plen 20 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - authentication method mismatch (0)" },
 
     /* corner: valid MACs over a trailer that is not after whole entries,
-     * so misaligned; accepted, and rip_rx_hook() drops them later */
+     * so misaligned; dropped before the trailer is read */
     { "Keyed MD5, 1 byte after the route entries (corner)",
       0, 0, 1, 1, 0, 0, 7, 0, RIP_TEST_NONE, 0,
-      "1 plen 45" },
+      "0 plen 65 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - packet length mismatch (45)" },
     { "Keyed MD5, 2 bytes after the route entries (corner)",
       0, 0, 1, 2, 0, 0, 7, 0, RIP_TEST_NONE, 0,
-      "1 plen 46" },
+      "0 plen 66 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - packet length mismatch (46)" },
     { "HMAC-SHA256, 19 bytes after the route entries (corner)",
       1, 0, 1, 19, 0, 0, 7, 0, RIP_TEST_NONE, 0,
-      "1 plen 63" },
+      "0 plen 99 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - packet length mismatch (63)" },
     { "HMAC-SHA256, demand circuit, 3 bytes short of a route entry (corner)",
       1, 1, 1, -3, 0, 0, 7, 0, RIP_TEST_NONE, 0,
-      "1 plen 45" },
+      "0 plen 81 rip1: Authentication failed for " RIP_TEST_NBR " on eth-odd.4094 - packet length mismatch (45)" },
   };
 
   rip_test_init();
