@@ -532,6 +532,92 @@ t_parse_link_update(void)
 
 
 /*
+ * A bridge's link message built in host byte order, unlike the captures,
+ * so that this also runs on big-endian hosts: IFLA_BR_VLAN_FILTERING of
+ * len bytes (none if 0), with value in its first byte and pad in the rest
+ * of its 4 aligned bytes
+ */
+static struct nlmsghdr *
+nl_test_bridge_msg(uint len, byte value, byte pad)
+{
+  uint size = 256;
+  struct nlmsghdr *h = alloca(size);
+  memset(h, 0, size);
+
+  h->nlmsg_type = RTM_NEWLINK;
+  h->nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+
+  struct ifinfomsg *i = NLMSG_DATA(h);
+  i->ifi_family = AF_UNSPEC;
+  i->ifi_type = ARPHRD_ETHER;
+  i->ifi_index = 50;
+  i->ifi_flags = IFF_UP | IFF_BROADCAST | IFF_MULTICAST;
+
+  nl_add_attr(h, size, IFLA_IFNAME, "nb0", 4);
+  nl_add_attr_u32(h, size, IFLA_MTU, 1500);
+
+  struct rtattr *li = nl_open_attr(h, size, IFLA_LINKINFO);
+  nl_add_attr(h, size, IFLA_INFO_KIND, "bridge", 7);
+  struct rtattr *data = nl_open_attr(h, size, IFLA_INFO_DATA);
+
+  if (len)
+  {
+    byte buf[4] = { value, pad, pad, pad };
+    struct rtattr *a = nl_add_attr(h, size, IFLA_BR_VLAN_FILTERING, buf, len);
+    memcpy(RTA_DATA(a), buf, 4);
+  }
+
+  nl_close_attr(h, data);
+  nl_close_attr(h, li);
+  h->nlmsg_len = NLMSG_ALIGN(h->nlmsg_len);
+
+  struct nlmsghdr *copy = xmalloc(h->nlmsg_len);
+  memcpy(copy, h, h->nlmsg_len);
+  return copy;
+}
+
+#define NL_BR_IFACE	"nb0 index 50 mtu 1500 admin-up multiaccess broadcast multicast bridge"
+
+/* The kernel sends IFLA_BR_VLAN_FILTERING as a u8 */
+static int
+t_parse_link_bridge(void)
+{
+  static const struct {
+    const char *description;
+    uint len;
+    byte value;
+    byte pad;
+    const char *expected;
+  } cases[] = {
+    { "VLAN filtering on (positive)", 1, 1, 0,
+      NL_BR_IFACE " vlan-filtering 1" },
+    { "VLAN filtering off (positive)", 1, 0, 0,
+      NL_BR_IFACE " vlan-filtering 0" },
+    { "VLAN filtering on, padding set (corner)", 1, 1, 0xff,
+      NL_BR_IFACE " vlan-filtering 1" },
+    { "VLAN filtering off, padding set (corner)", 1, 0, 0xff,
+      NL_BR_IFACE " vlan-filtering 0" },
+    { "VLAN filtering 255 is passed on (boundary)", 1, 255, 0,
+      NL_BR_IFACE " vlan-filtering 255" },
+    { "VLAN filtering of 4 bytes is not taken (negative)", 4, 1, 0,
+      NL_BR_IFACE },
+    { "no VLAN filtering attribute (negative)", 0, 0, 0,
+      NL_BR_IFACE },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nlmsghdr *h = nl_test_bridge_msg(cases[i].len, cases[i].value, cases[i].pad);
+    nl_parse_link(h, 0);
+    nl_test_check_iface(cases[i].description, if_find_by_index(50), cases[i].expected);
+    xfree(h);
+  }
+
+  return 1;
+}
+
+
+/*
  *	Addresses
  */
 
@@ -2677,6 +2763,8 @@ main(int argc, char *argv[])
 {
   bt_init(argc, argv);
   bt_bird_init();
+
+  bt_test_suite(t_parse_link_bridge, "Bridge links built in host byte order");
 
   /* The captures are of a little-endian host, and netlink messages are in
    * host byte order */
