@@ -1144,7 +1144,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
   {
     struct rtattr *li[BIRD_INFO_MAX];
     nl_attr_len = RTA_PAYLOAD(a[IFLA_LINKINFO]);
-    nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li));
+    if (!nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li)))
+      goto malformed;
 
     if (li[IFLA_INFO_KIND] && rta_is_str(li[IFLA_INFO_KIND]))
       kind = RTA_DATA(li[IFLA_INFO_KIND]);
@@ -1155,7 +1156,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       struct rtattr *data[BIRD_IFLA_BR_MAX];
       nl_attr_len = RTA_PAYLOAD(li[IFLA_INFO_DATA]);
-      nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_br_attr_want, data, sizeof(data));
+      if (!nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_br_attr_want, data, sizeof(data)))
+	goto malformed;
 
       if (data[IFLA_BR_VLAN_FILTERING])
       {
@@ -1169,7 +1171,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       struct rtattr *data[BIRD_IFLA_VXLAN_MAX];
       nl_attr_len = RTA_PAYLOAD(li[IFLA_INFO_DATA]);
-      nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_vxlan_attr_want, data, sizeof(data));
+      if (!nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_vxlan_attr_want, data, sizeof(data)))
+	goto malformed;
 
       if (data[IFLA_VXLAN_ID])
       {
@@ -1242,6 +1245,11 @@ nl_parse_link(struct nlmsghdr *h, int scan)
       if (!scan)
 	if_end_partial_update(ifi);
     }
+
+  return;
+
+malformed:
+  log(L_ERR "KIF: Malformed message received");
 }
 
 static void
