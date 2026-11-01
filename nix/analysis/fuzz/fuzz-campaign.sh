@@ -79,9 +79,20 @@ total_weight=0
 for h in $harnesses; do
   total_weight=$(( total_weight + $(fuzz_weight "$h") ))
 done
+used=0
 for h in $harnesses; do
   n=$(( jobs * $(fuzz_weight "$h") / total_weight ))
   forks[$h]=$(( n < 1 ? 1 : n ))
+  used=$(( used + forks[$h] ))
+done
+# Rounding down leaves jobs unused; hand them out heaviest harness first.
+mapfile -t by_weight < <(for h in $harnesses; do echo "$(fuzz_weight "$h") $h"; done | sort -rn | cut -d' ' -f2)
+i=0
+while [ "$used" -lt "$jobs" ]; do
+  h="${by_weight[i % ${#by_weight[@]}]}"
+  forks[$h]=$(( forks[$h] + 1 ))
+  used=$(( used + 1 ))
+  i=$(( i + 1 ))
 done
 
 started="$(date -u +%FT%TZ)"
