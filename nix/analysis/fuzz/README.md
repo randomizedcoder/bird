@@ -133,6 +133,40 @@ cat ~/bird-fuzz/status.txt
   - each corpus is minimized (`-merge=1`, skip with `--no-merge`)
   - `DIR/summary.txt` gets one line per harness
 
+## Targeted campaigns: `fuzz-plateau`
+
+```sh
+# only the harnesses that cover what this branch changed since master
+nix run .#fuzz-plateau -- --changed master
+# every harness, each stopped at its own plateau
+nix run .#fuzz-plateau -- --workdir ~/bird-fuzz
+```
+
+`fuzz-plateau` is `fuzz-campaign --hours 3 --plateau-minutes 30`, and
+takes the same options; later ones win.
+
+- **Plateau stop:** a harness whose coverage (`cov`, or the finer libFuzzer
+  features with `--plateau-metric ft`) has not grown for
+  `--plateau-minutes` is stopped. Its jobs go to the heaviest harness still
+  running, which is restarted with them on the same corpus. The campaign
+  ends when every harness has stopped, or at `--hours`, and then
+  reproduces, deduplicates and merges as above. `DIR/campaign.txt` logs
+  each stop and handover, and `status.txt` shows each harness's state.
+- **Why:** in the first 12-hour campaign, `ospf_lsa`, `rip` and `flowspec`
+  reached 99% of their final coverage in 15 minutes, `babel`, `rpki` and
+  `bfd` within 90, and `ospf` in two hours. Only `bgp_msg`, `bgp_open`,
+  `cli` and `config` were still growing after eight hours.
+- **`--changed REF`:** keeps the harnesses that cover a file changed since
+  the merge base of `REF` and `HEAD` (uncommitted changes included), in the
+  git checkout of the current directory. Each harness covers the shared
+  code (`corePaths` in `../fuzz.nix`: `lib/`, `nest/`, `conf/`, `filter/`,
+  `sysdep/unix/` and the harness headers), its own `fuzz_<name>.c`, and
+  its `paths`. Run it from the checkout the fuzzers were built from, so
+  the binaries match the changes.
+- A plateau is not proof of no bugs: the first campaign's netlink crash
+  came after eight hours, with coverage almost flat. For a release, or
+  after big changes, run `fuzz-campaign` for longer.
+
 ## Coverage: `fuzz-coverage`
 
 ```sh

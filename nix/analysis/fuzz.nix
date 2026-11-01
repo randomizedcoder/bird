@@ -5,8 +5,9 @@
 #   fuzzers        one clang build of BIRD (libFuzzer + ASan + UBSan
 #                  instrumentation), the fuzz_* binaries, plain-main replay_*
 #                  binaries, seed corpora, the keyword dictionary, and the
-#                  run-fuzzers (short runs) and fuzz-campaign (long,
-#                  resumable runs) wrappers
+#                  run-fuzzers (short runs), fuzz-campaign (long,
+#                  resumable runs) and fuzz-plateau (a campaign that stops
+#                  each harness once its coverage plateaus) wrappers
 #   fuzz-run       run every harness for runSeconds in the sandbox; saves
 #                  crash inputs and symbolized reproductions (always exits 0:
 #                  the crashes are the deliverable, not a build failure)
@@ -30,60 +31,119 @@ let
 
   # Per harness: the largest useful input (BGP extended messages and RPKI
   # PDUs go to 64k), the campaign weight (share of fuzz-campaign jobs; more
-  # for the larger attack surfaces), and whether it gets the keyword
-  # dictionary (text inputs).
+  # for the larger attack surfaces), whether it gets the keyword dictionary
+  # (text inputs), and the source globs it covers besides corePaths and its
+  # own fuzz_<name>.c (fuzz-campaign --changed).
   harnessMeta = {
     bgp_msg = {
       maxLen = 65536;
       weight = 3;
+      paths = [
+        "proto/bgp/*"
+        "nix/analysis/fuzz/fuzz_bgp_common.h"
+      ];
     };
     bgp_open = {
       maxLen = 4096;
       weight = 1;
+      paths = [
+        "proto/bgp/*"
+        "nix/analysis/fuzz/fuzz_bgp_common.h"
+      ];
     };
     flowspec = {
       maxLen = 4096;
       weight = 1;
+      paths = [
+        "proto/bgp/*"
+      ];
     };
     config = {
       maxLen = 16384;
       weight = 2;
       dict = true;
+      paths = [
+        "proto/*/config.Y"
+        "sysdep/*/*.Y"
+        "doc/bird.conf.example*"
+      ];
     };
     babel = {
       maxLen = 4096;
       weight = 2;
+      paths = [
+        "proto/babel/*"
+      ];
     };
     rip = {
       maxLen = 4096;
       weight = 2;
+      paths = [
+        "proto/rip/*"
+      ];
     };
     rpki = {
       maxLen = 65536;
       weight = 2;
+      paths = [
+        "proto/rpki/*"
+      ];
     };
     netlink = {
       maxLen = 32768;
       weight = 2;
+      paths = [
+        "sysdep/linux/*"
+        "proto/bridge/*"
+      ];
     };
     cli = {
       maxLen = 16384;
       weight = 2;
       dict = true;
+      paths = [
+        "proto/*/config.Y"
+        "client/*"
+      ];
     };
     ospf = {
       maxLen = 8192;
       weight = 3;
+      paths = [
+        "proto/ospf/*"
+      ];
     };
     ospf_lsa = {
       maxLen = 4096;
       weight = 1;
+      paths = [
+        "proto/ospf/*"
+      ];
     };
     bfd = {
       maxLen = 512;
       weight = 1;
+      paths = [
+        "proto/bfd/*"
+      ];
     };
   };
+
+  # Code every harness runs: startup, the config, tables, filters, I/O.
+  corePaths = [
+    "lib/*"
+    "nest/*"
+    "conf/*"
+    "filter/*"
+    "sysdep/unix/*"
+    "sysdep/config.h"
+    "nix/analysis/fuzz/fuzz.mk"
+    "nix/analysis/fuzz/fuzz_bird.h"
+    "nix/analysis/fuzz/fuzz_harness.h"
+    "nix/analysis/fuzz/fuzz_iface.h"
+    "nix/analysis/fuzz/fuzz_sock.h"
+    "nix/analysis/fuzz/gen_seeds.py"
+  ];
 
   harnesses = lib.attrNames harnessMeta;
   fuzzerNames = lib.concatMapStringsSep " " (h: "fuzz_${h}") harnesses;
@@ -106,8 +166,11 @@ let
     root="$(cd "$(dirname "$0")/.." && pwd)"
     symbolizer="${symbolizer}"
     FUZZ_ALL="${lib.concatStringsSep " " harnesses}"
+    # shellcheck disable=SC2034 # read by fuzz-campaign only
+    FUZZ_CORE_PATHS="${toString corePaths}"
     ${shellCase "fuzz_max_len" "4096" (m: m.maxLen)}
     ${shellCase "fuzz_weight" "1" (m: m.weight)}
+    ${shellCase "fuzz_paths" "" (m: m.paths)}
     ${shellCase "fuzz_dict" "" (
       m: lib.optionalString (m.dict or false) "$root/share/bird-fuzz/bird.dict"
     )}
@@ -212,9 +275,21 @@ let
 
   fuzzCampaign = pkgs.writeShellApplication {
     name = "fuzz-campaign";
-    runtimeInputs = scriptInputs;
+    runtimeInputs = scriptInputs ++ [ pkgs.git ];
     bashOptions = [ "nounset" ];
     text = scriptPrelude + builtins.readFile ./fuzz/fuzz-campaign.sh;
+  };
+
+  # fuzz-campaign with a plateau stop: most harnesses stop gaining coverage
+  # within the first hour or two (see ./fuzz/README.md). Later options win,
+  # so `fuzz-plateau --hours 4` or `--plateau-minutes 60` still work.
+  fuzzPlateau = pkgs.writeShellApplication {
+    name = "fuzz-plateau";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      root="$(cd "$(dirname "$0")/.." && pwd)"
+      exec "$root/bin/fuzz-campaign" --hours 3 --plateau-minutes 30 "$@"
+    '';
   };
 
   # Stage 1: BIRD built with fuzzer instrumentation. The output is the built
@@ -297,6 +372,7 @@ let
       done
       install -m755 ${lib.getExe runFuzzers} $out/bin/run-fuzzers
       install -m755 ${lib.getExe fuzzCampaign} $out/bin/fuzz-campaign
+      install -m755 ${lib.getExe fuzzPlateau} $out/bin/fuzz-plateau
       cp fuzz-out/bird.dict $out/share/bird-fuzz/
       cp ${harnessSrc}/README.md ${harnessSrc}/ubsan.supp $out/share/bird-fuzz/
       runHook postInstall

@@ -4,11 +4,21 @@
 # fuzz-common.sh).
 #
 #   fuzz-campaign [--hours H] [--jobs N] [--workdir DIR] [--harnesses "a b"]
+#                 [--changed REF] [--plateau-minutes M] [--plateau-metric cov|ft]
 #                 [--status-minutes M] [--min-free-gb G] [--rss-mb MB]
 #
-# Defaults: 12 hours, nproc - 2 jobs, ~/bird-fuzz, every harness, status
-# every 15 minutes, stop if the work directory's file system has less than
-# 10 GB free, 4096 MB per fuzzing process.
+# Defaults: 12 hours, nproc - 2 jobs, ~/bird-fuzz, every harness, no
+# plateau stop, status every 15 minutes, stop if the work directory's file
+# system has less than 10 GB free, 4096 MB per fuzzing process.
+#
+# --changed REF keeps only the harnesses that cover a file changed since
+# the merge base of REF and HEAD, uncommitted changes included, in the git
+# checkout of the current directory (see fuzz_paths in ../fuzz.nix).
+#
+# --plateau-minutes M stops a harness once its coverage (cov, or with
+# --plateau-metric ft the finer libFuzzer features) has not grown for M
+# minutes. Its jobs go to the heaviest harness still running, which is
+# restarted with them; the campaign ends when every harness has stopped.
 #
 # DIR/<harness>/corpus is kept between runs, so a second campaign (or one
 # restarted after an interruption) continues from the coverage already
@@ -30,6 +40,9 @@ hours=12
 jobs=$(( $(nproc) - 2 ))
 workdir="${HOME:-/tmp}/bird-fuzz"
 harnesses="$FUZZ_ALL"
+changed=""
+plateau_minutes=0
+plateau_metric=cov
 status_minutes=15
 min_free_gb=10
 rss_mb=4096
@@ -46,6 +59,9 @@ while [ $# -gt 0 ]; do
     --jobs) jobs="$2"; shift 2 ;;
     --workdir) workdir="$2"; shift 2 ;;
     --harnesses) harnesses="$2"; shift 2 ;;
+    --changed) changed="$2"; shift 2 ;;
+    --plateau-minutes) plateau_minutes="$2"; shift 2 ;;
+    --plateau-metric) plateau_metric="$2"; shift 2 ;;
     --status-minutes) status_minutes="$2"; shift 2 ;;
     --min-free-gb) min_free_gb="$2"; shift 2 ;;
     --rss-mb) rss_mb="$2"; shift 2 ;;
@@ -56,6 +72,40 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$jobs" -ge 1 ] || jobs=1
+case "$plateau_metric" in
+  cov|ft) ;;
+  *) echo "fuzz-campaign: --plateau-metric is cov or ft" >&2; exit 2 ;;
+esac
+plateau=$(( plateau_minutes * 60 ))
+
+# Does harness $1 cover file $2?
+covers() {
+  local h="$1" f="$2" p pats
+  read -r -a pats <<< "$FUZZ_CORE_PATHS $(fuzz_paths "$h") nix/analysis/fuzz/fuzz_$h.c"
+  for p in "${pats[@]}"; do
+    # shellcheck disable=SC2053 # $p is a glob
+    [[ $f == $p ]] && return 0
+  done
+  return 1
+}
+
+if [ -n "$changed" ]; then
+  base="$(git merge-base "$changed" HEAD)" ||
+    { echo "fuzz-campaign: no merge base of $changed and HEAD here" >&2; exit 2; }
+  mapfile -t files < <(git diff --name-only "$base")
+  picked=""
+  for h in $harnesses; do
+    for f in "${files[@]}"; do
+      if covers "$h" "$f"; then picked="$picked $h"; break; fi
+    done
+  done
+  harnesses="${picked# }"
+  if [ -z "$harnesses" ]; then
+    echo "fuzz-campaign: no harness covers the ${#files[@]} files changed since $changed"
+    exit 0
+  fi
+  echo "fuzz-campaign: changes since $changed are covered by: $harnesses"
+fi
 secs="$(awk -v h="$hours" 'BEGIN { s = int(h * 3600); print (s < 60) ? 60 : s }')"
 interval=$(( status_minutes * 60 ))
 [ "$interval" -ge 10 ] || interval=10
@@ -105,20 +155,79 @@ deadline=$(( $(date +%s) + secs ))
 [ -f "$workdir/history.csv" ] ||
   echo "time,harness,execs,cov,ft,corpus,exec_s,crash_files" > "$workdir/history.csv"
 
-declare -A pids
-for h in $harnesses; do
-  dir="$workdir/$h"
-  fuzz_prepare "$dir" "$h"
-  echo "=== $started: -fork=${forks[$h]} -max_total_time=$secs" >> "$dir/fuzz.log"
+note() {
+  echo "fuzz-campaign: $*" | tee -a "$workdir/campaign.txt"
+}
+
+# Run harness $1 for $2 seconds with forks[$1] jobs.
+declare -A pids state best grown
+start_harness() {
+  local h="$1" left="$2" dir="$workdir/$1" extra
+  echo "=== $(date -u +%FT%TZ): -fork=${forks[$h]} -max_total_time=$left" >> "$dir/fuzz.log"
   mapfile -t extra < <(fuzz_args "$h")
   (cd "$dir" && exec nice -n 10 "$root/bin/fuzz_$h" \
-    -fork="${forks[$h]}" -max_total_time="$secs" "${extra[@]}" \
+    -fork="${forks[$h]}" -max_total_time="$left" "${extra[@]}" \
     -rss_limit_mb="$rss_mb" -malloc_limit_mb="$rss_mb" -timeout=25 \
     -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1 \
     -artifact_prefix="$dir/crashes/" -print_final_stats=1 \
     "$dir/corpus" >> "$dir/fuzz.log" 2>&1) &
   pids[$h]=$!
+  state[$h]=run
+}
+
+# Stop harness $1, giving the fork-mode parent time to collect its jobs.
+stop_harness() {
+  local h="$1"
+  kill -INT "${pids[$h]}" 2>/dev/null || true
+  for _ in $(seq 60); do
+    kill -0 "${pids[$h]}" 2>/dev/null || break
+    sleep 2
+  done
+  kill -KILL "${pids[$h]}" 2>/dev/null || true
+  wait "${pids[$h]}" 2>/dev/null || true
+}
+
+for h in $harnesses; do
+  fuzz_prepare "$workdir/$h" "$h"
+  start_harness "$h" "$secs"
+  best[$h]=0
+  grown[$h]=$(date +%s)
 done
+
+# Stop the harnesses whose coverage has not grown for $plateau seconds, and
+# hand their jobs to the heaviest one still running.
+check_plateau() {
+  local now h s v x to left
+  now=$(date +%s)
+  for h in $harnesses; do
+    [ "${state[$h]}" = run ] || continue
+    read -r -a s <<< "$(fuzz_stats "$workdir/$h")"
+    if [ "$plateau_metric" = ft ]; then v="${s[2]}"; else v="${s[1]}"; fi
+    if [ "$v" -gt "${best[$h]}" ]; then
+      best[$h]=$v
+      grown[$h]=$now
+      continue
+    fi
+    [ "${best[$h]}" -gt 0 ] && [ $(( now - grown[$h] )) -ge "$plateau" ] || continue
+
+    note "$h: $plateau_metric stayed at ${best[$h]} for $plateau_minutes min, stopping"
+    stop_harness "$h"
+    state[$h]=plateau
+
+    to=""
+    for x in "${by_weight[@]}"; do
+      if [ "${state[$x]}" = run ]; then to="$x"; break; fi
+    done
+    left=$(( deadline - $(date +%s) ))
+    if [ -n "$to" ] && [ "$left" -ge 300 ]; then
+      note "$to: restarting with ${forks[$h]} more jobs (from $h), $(( left / 60 )) min left"
+      stop_harness "$to"
+      forks[$to]=$(( forks[$to] + forks[$h] ))
+      start_harness "$to" "$left"
+    fi
+    forks[$h]=0
+  done
+}
 
 write_status() {
   local now t h s
@@ -126,11 +235,11 @@ write_status() {
   t="$workdir/status.txt.new"
   {
     echo "bird fuzz campaign: started $started, now $now, ends in $(( (deadline - $(date +%s)) / 60 )) min"
-    printf '%-10s %5s %12s %7s %8s %8s %8s %7s\n' harness jobs execs cov ft corpus exec/s crashes
+    printf '%-10s %-7s %5s %12s %7s %8s %8s %8s %7s\n' harness state jobs execs cov ft corpus exec/s crashes
     for h in $harnesses; do
       read -r -a s <<< "$(fuzz_stats "$workdir/$h")"
       c="$(fuzz_crash_count "$workdir/$h")"
-      printf '%-10s %5s %12s %7s %8s %8s %8s %7s\n' "$h" "${forks[$h]}" "${s[0]}" "${s[1]}" "${s[2]}" "${s[3]}" "${s[4]}" "$c"
+      printf '%-10s %-7s %5s %12s %7s %8s %8s %8s %7s\n' "$h" "${state[$h]}" "${forks[$h]}" "${s[0]}" "${s[1]}" "${s[2]}" "${s[3]}" "${s[4]}" "$c"
       echo "$now,$h,${s[0]},${s[1]},${s[2]},${s[3]},${s[4]},$c" >> "$workdir/history.csv"
     done
     echo "free: $(free_gb) GB in $workdir"
@@ -155,9 +264,15 @@ running() {
 }
 
 next=$(( $(date +%s) + interval ))
+next_plateau=$(( $(date +%s) + 60 ))
 while running; do
   sleep 10 || true
   [ "$interrupted" = 1 ] && break
+
+  if [ "$plateau" -gt 0 ] && [ "$(date +%s)" -ge "$next_plateau" ]; then
+    check_plateau
+    next_plateau=$(( $(date +%s) + 60 ))
+  fi
 
   if [ "$(date +%s)" -ge "$next" ]; then
     write_status
@@ -165,14 +280,14 @@ while running; do
   fi
 
   if [ "$(free_gb)" -lt "$min_free_gb" ]; then
-    echo "fuzz-campaign: less than ${min_free_gb} GB free, stopping early" | tee -a "$workdir/campaign.txt"
+    note "less than ${min_free_gb} GB free, stopping early"
     stop_all
     break
   fi
 
   # libFuzzer stops itself at -max_total_time; this catches a stuck one.
   if [ "$(date +%s)" -gt $(( deadline + 900 )) ]; then
-    echo "fuzz-campaign: past the deadline, stopping" | tee -a "$workdir/campaign.txt"
+    note "past the deadline, stopping"
     stop_all
     break
   fi

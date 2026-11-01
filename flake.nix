@@ -116,11 +116,16 @@
         };
 
         # nix run .#fuzz-campaign -- --hours 12   (long, resumable fuzzing)
+        # nix run .#fuzz-plateau -- --changed master   (stops at coverage plateaus)
         # nix run .#fuzz-coverage -- ~/bird-fuzz  (what the corpus reaches)
         apps = {
           fuzz-campaign = {
             type = "app";
             program = "${analysis.fuzzers}/bin/fuzz-campaign";
+          };
+          fuzz-plateau = {
+            type = "app";
+            program = "${analysis.fuzzers}/bin/fuzz-plateau";
           };
           fuzz-coverage = {
             type = "app";
