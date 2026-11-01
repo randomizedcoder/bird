@@ -832,7 +832,7 @@ kbr_check_iface(struct kbr_proto *p, const struct iface *i)
   u32 if_vlan_filtering = ea_get_int(attrs, EA_IFACE_BRIDGE_VLAN_FILTERING, U32_UNDEF);
   if (p->vlan_filtering && !if_vlan_filtering)
   {
-    log(L_WARN "%s: Mismatch in VLAN filtering", p->p.name, i->name);
+    log(L_WARN "%s: Interface %s has no VLAN filtering", p->p.name, i->name);
     return false;
   }
 
