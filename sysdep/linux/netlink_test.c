@@ -2692,8 +2692,8 @@ static const byte nl_test_br_no_filtering[] = { NL_TEST_BR_LINKINFO(4, 0, IFLA_I
 static const byte nl_test_br_no_data[] = { NL_TEST_BR_LINKINFO() };
 
 /* The links of the bridge rows: br0's VLAN filtering flag from its link
- * message, and the AF_BRIDGE link notifications the kernel sends for the
- * ports to the link group BIRD listens to */
+ * message, and the AF_BRIDGE link notifications the kernel sends for br0 and
+ * its ports to the link group BIRD listens to, which are not links */
 static int
 t_parse_bridge_link(void)
 {
@@ -2728,6 +2728,11 @@ t_parse_bridge_link(void)
     /* AF_BRIDGE notifications */
     { "v0's AF_BRIDGE RTM_NEWLINK leaves v0 as it is (positive)", "v0", 1, 0, {},
       "v0 index 5 mtu 1500 admin-up multiaccess broadcast multicast master br0 lladdr 56:6f:f3:24:7b:da" },
+    { "v0's AF_BRIDGE RTM_DELLINK (port removed, or RTM_DELVLAN) does not delete v0 (negative)", "v0", 1, 1, {},
+      "v0 index 5 mtu 1500 admin-up multiaccess broadcast multicast master br0 lladdr 56:6f:f3:24:7b:da" },
+    { "br0's AF_BRIDGE RTM_NEWLINK keeps br0 a bridge with VLAN filtering (negative)", "br0", 1, 0, {},
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "v0's own RTM_DELLINK still deletes v0 (positive)", "v0", 0, 1, {}, "none" },
   };
 
   struct nl_test_capture links, vlans;
