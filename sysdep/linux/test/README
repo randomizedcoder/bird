@@ -66,6 +66,18 @@ test loads first.
   198.18.23.0/24 encap mpls 105 are added and deleted; here a dummy
   interface c0 comes first, so d0 is index 4
 
+The bridge rows have a VLAN filtering bridge br0 (index 3) with one port
+v0 (5), one end of a veth pair whose other end v0p (4, 02:00:00:00:00:12)
+is outside the bridge:
+
+  fdb_show/ip.pcap, "bridge fdb show br br0", after static entries for
+  02:00:00:00:00:21 (VLANs 1 and 10, and none) and 02:00:00:00:00:22
+  (VLAN 10), and a frame from v0p
+  fdb_show/netlink_route_getneigh_bridge_all.pcap, "bridge fdb show"
+  fdb_event/ip.pcap, "ip monitor all" while 02:00:00:00:00:21 is added
+  and deleted, then a frame from v0p; here a dummy interface c0 comes
+  first, so br0 is index 4, v0p 5 and v0 6
+
 Netlink messages are in host byte order, so the tests of the captures
 are skipped on big-endian hosts.
 

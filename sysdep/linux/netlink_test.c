@@ -27,6 +27,15 @@
 #define kif_sys_start		nl_test_unused_kif_sys_start
 #define kif_do_scan		nl_test_unused_kif_do_scan
 
+/* The same for the bridge protocol: record what the FDB and VLAN parsers
+ * hand to it, with no netlink sockets and no scans */
+#define kbr_got_fdb		nl_test_got_fdb
+#define kbr_got_vlan		nl_test_got_vlan
+#define kbr_got_vlan_tunnel	nl_test_got_vlan_tunnel
+#define kbr_sys_start		nl_test_unused_kbr_sys_start
+#define kbr_do_fdb_scan		nl_test_unused_kbr_do_fdb_scan
+#define kbr_do_vlan_scan	nl_test_unused_kbr_do_vlan_scan
+
 #include "sysdep/linux/netlink.c"
 
 #undef krt_got_route
@@ -35,6 +44,12 @@
 #undef krt_do_scan
 #undef kif_sys_start
 #undef kif_do_scan
+#undef kbr_got_fdb
+#undef kbr_got_vlan
+#undef kbr_got_vlan_tunnel
+#undef kbr_sys_start
+#undef kbr_do_fdb_scan
+#undef kbr_do_vlan_scan
 
 int krt_sys_start(struct krt_proto *p);
 void krt_do_scan(struct krt_proto *p);
@@ -56,6 +71,27 @@ krt_sys_start(struct krt_proto *p)
 void krt_do_scan(struct krt_proto *p UNUSED) { }
 void kif_sys_start(struct kif_proto *p UNUSED) { }
 void kif_do_scan(struct kif_proto *p UNUSED) { }
+
+#ifdef CONFIG_BRIDGE
+int kbr_sys_start(struct kbr_proto *p);
+void kbr_do_fdb_scan(struct kbr_proto *p);
+void kbr_do_vlan_scan(struct kbr_proto *p);
+
+/* Only register the bridge, as the real one does before opening the
+ * sockets */
+int
+kbr_sys_start(struct kbr_proto *p)
+{
+  if (HASH_FIND(nl_bridge_map, BRH, kbr_bridge_id(p)))
+    return 0;
+
+  HASH_INSERT2(nl_bridge_map, BRH, krt_pool, p);
+  return 1;
+}
+
+void kbr_do_fdb_scan(struct kbr_proto *p UNUSED) { }
+void kbr_do_vlan_scan(struct kbr_proto *p UNUSED) { }
+#endif
 
 #define NL_TEST_DIR "sysdep/linux/test/"
 
@@ -280,6 +316,14 @@ nl_test_format_iface(struct iface *i, char *buf, uint size)
 
   if (i->master)
     pos += bsnprintf(pos, buf + size - pos, " master %s", i->master->name);
+
+  ea_list *attrs = i->attrs ? i->attrs->eattrs : NULL;
+  if (ea_get_int(attrs, EA_IFACE_TYPE, IF_TYPE_UNDEF) == IF_TYPE_BRIDGE)
+    pos += bsnprintf(pos, buf + size - pos, " bridge");
+
+  u32 vlan_filtering = ea_get_int(attrs, EA_IFACE_BRIDGE_VLAN_FILTERING, U32_UNDEF);
+  if (vlan_filtering != U32_UNDEF)
+    pos += bsnprintf(pos, buf + size - pos, " vlan-filtering %u", vlan_filtering);
 
   const byte *m = i->lladdr.addr;
   if (m[0] | m[1] | m[2] | m[3] | m[4] | m[5])
@@ -1808,6 +1852,384 @@ t_parse_mpls_event(void)
 #endif
 
 
+#ifdef CONFIG_BRIDGE
+
+/*
+ *	Bridge FDB
+ */
+
+/* The bridge rows of xtcp2's brmpls corpus (see README) have a VLAN
+ * filtering bridge br0 with one port v0, the end of a veth pair whose other
+ * end v0p is outside the bridge. The protocol starts when br0 comes up. */
+#define NL_TEST_BRIDGE_CONFIG						\
+  "router id 192.0.2.1;\n"						\
+  "eth table etab;\n"							\
+  "protocol device { scan time 86400; }\n"				\
+  "protocol bridge kb { eth { table etab; }; bridge device \"br0\"; vlan filtering yes; }\n"
+
+static struct kbr_proto *
+nl_test_bridge_setup(const char *row)
+{
+  bt_assert_msg(bt_config_parse(NL_TEST_BRIDGE_CONFIG), "Bridge test config");
+  nl_test_pump();
+  nl_test_load_ns(row);
+  nl_test_pump();
+
+  struct iface *br = if_find_by_name("br0");
+  struct kbr_proto *p = br ? HASH_FIND(nl_bridge_map, BRH, br->index) : NULL;
+  bt_assert_msg(p && (p->p.proto_state == PS_UP), "Bridge protocol up on br0");
+  return p;
+}
+
+void nl_test_got_fdb(struct kbr_proto *p, const net_addr *n, rte *e, int src, bool scan, bool tunnel);
+
+/* "proto mode entry [dev D] source [via G] [vni N] [tunnel]" */
+void
+nl_test_got_fdb(struct kbr_proto *p, const net_addr *n, rte *e, int src, bool scan, bool tunnel)
+{
+  static const char *srcs[] = {
+    [KBR_SRC_BIRD] = "bird",
+    [KBR_SRC_LOCAL] = "local",
+    [KBR_SRC_STATIC] = "static",
+    [KBR_SRC_DYNAMIC] = "dynamic",
+  };
+
+  if (nl_test_routes_pos != nl_test_routes)
+    nl_test_routes_add("; ");
+  else
+    nl_test_routes[0] = 0;
+
+  nl_test_routes_add("%s %s %N", p->p.name, scan ? "scan" : (e ? "add" : "del"), n);
+
+  if (e)
+    nl_test_routes_add(" dev %s", e->attrs->nh.iface ? e->attrs->nh.iface->name : "?");
+
+  nl_test_routes_add(" %s", ((src >= 0) && (src < KBR_SRC_MAX)) ? srcs[src] : "?");
+
+  if (e && ipa_nonzero(e->attrs->nh.gw))
+    nl_test_routes_add(" via %I", e->attrs->nh.gw);
+
+  if (e && e->attrs->nh.labels)
+    nl_test_routes_add(" vni %u", e->attrs->nh.label[0]);
+
+  if (tunnel)
+    nl_test_routes_add(" tunnel");
+
+  if (e)
+    rte_free(e);
+}
+
+/* The captured FDB entry for mac on vid (0 for none) */
+static struct nlmsghdr *
+nl_test_find_fdb(struct nl_test_capture *c, const byte *mac, uint vid)
+{
+  for (uint i = 0; i < c->count; i++)
+  {
+    struct nlmsghdr *h = c->msg[i];
+    if ((h->nlmsg_type != RTM_NEWNEIGH) || (((struct ndmsg *) NLMSG_DATA(h))->ndm_family != AF_BRIDGE))
+      continue;
+
+    struct rtattr *l = nl_test_find_attr(h, sizeof(struct ndmsg), NDA_LLADDR);
+    struct rtattr *v = nl_test_find_attr(h, sizeof(struct ndmsg), NDA_VLAN);
+    if (l && (RTA_PAYLOAD(l) == 6) && !memcmp(RTA_DATA(l), mac, 6) && ((v ? rta_get_u16(v) : 0) == vid))
+      return h;
+  }
+
+  bt_abort_msg("No FDB entry %02x:%02x:%02x:%02x:%02x:%02x vlan %u in the capture",
+	       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], vid);
+  return NULL;
+}
+
+/* Parse FDB message h as a scan of br0 does, or as a notification */
+static void
+nl_test_parse_fdb(struct nlmsghdr *h, int scan)
+{
+  nl_test_routes_reset();
+
+  if (scan)
+  {
+    struct iface *br = if_find_by_name("br0");
+    struct nl_parse_state s = {
+      .pool = nl_linpool,
+      .scan = 1,
+      .bridge_id = br ? br->index : 0,
+    };
+
+    nl_parse_fdb(&s, h);
+  }
+  else
+    nl_async_msg(h);
+}
+
+/* The entries of `bridge fdb show br br0` (fdb_show/ip.pcap); br0 is
+ * index 3, v0p 4 and v0 5:
+ *
+ *   33:33:00:00:00:01 dev br0 self permanent        (and three more multicast)
+ *   02:00:00:00:00:12 dev v0 vlan 1 master br0
+ *   02:00:00:00:00:22 dev v0 vlan 10 master br0 static
+ *   02:00:00:00:00:21 dev v0 vlan 10 master br0 static
+ *   02:00:00:00:00:21 dev v0 vlan 1 master br0 static
+ *   02:00:00:00:00:21 dev v0 master br0 static
+ *   02:75:34:b1:37:11 dev v0 vlan 10 master br0 permanent
+ *   02:75:34:b1:37:11 dev v0 vlan 1 master br0 permanent
+ *   02:75:34:b1:37:11 dev v0 master br0 permanent
+ *   33:33:00:00:00:01 dev v0 self permanent         (and one more multicast)
+ *
+ * `bridge fdb show` with no filter (getneigh_bridge_all) adds v0p's own
+ * multicast entries. */
+static int
+t_parse_fdb_capture(void)
+{
+  static const struct {
+    const char *description;
+    const char *capture;
+    int vlan_filtering;
+    const char *expected;
+  } cases[] = {
+    { "VLAN filtering: only the entries with a VLAN, no multicast and no self entries (positive)",
+      "fdb_show/ip.pcap", 1,
+      "kb scan 02:00:00:00:00:12 vlan 1 dev v0 dynamic; "
+      "kb scan 02:00:00:00:00:22 vlan 10 dev v0 static; "
+      "kb scan 02:00:00:00:00:21 vlan 10 dev v0 static; "
+      "kb scan 02:00:00:00:00:21 vlan 1 dev v0 static; "
+      "kb scan 02:75:34:b1:37:11 vlan 10 dev v0 local; "
+      "kb scan 02:75:34:b1:37:11 vlan 1 dev v0 local" },
+    { "no VLAN filtering: only the entries without a VLAN (positive)",
+      "fdb_show/ip.pcap", 0,
+      "kb scan 02:00:00:00:00:21 dev v0 static; "
+      "kb scan 02:75:34:b1:37:11 dev v0 local" },
+    { "the whole FDB: v0p is outside the bridge, so the same entries (corner)",
+      "fdb_show/netlink_route_getneigh_bridge_all.pcap", 1,
+      "kb scan 02:00:00:00:00:12 vlan 1 dev v0 dynamic; "
+      "kb scan 02:00:00:00:00:22 vlan 10 dev v0 static; "
+      "kb scan 02:00:00:00:00:21 vlan 10 dev v0 static; "
+      "kb scan 02:00:00:00:00:21 vlan 1 dev v0 static; "
+      "kb scan 02:75:34:b1:37:11 vlan 10 dev v0 local; "
+      "kb scan 02:75:34:b1:37:11 vlan 1 dev v0 local" },
+  };
+
+  struct kbr_proto *p = nl_test_bridge_setup("fdb_show");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture fdb;
+    char name[128];
+    char got[4096];
+
+    bsnprintf(name, sizeof(name), NL_TEST_BRMPLS "%s", cases[i].capture);
+    nl_test_load(&fdb, name);
+    p->vlan_filtering = cases[i].vlan_filtering;
+
+    got[0] = 0;
+    for (uint j = 0; j < fdb.count; j++)
+    {
+      if (fdb.msg[j]->nlmsg_type != RTM_NEWNEIGH)
+	continue;
+
+      nl_test_parse_fdb(fdb.msg[j], 1);
+      if (strcmp(nl_test_routes, "none"))
+	bsnprintf(got + strlen(got), sizeof(got) - strlen(got), "%s%s", got[0] ? "; " : "", nl_test_routes);
+    }
+
+    bt_assert_msg(!strcmp(got, cases[i].expected), "%s: got \"%s\", expected \"%s\"",
+		  cases[i].description, got, cases[i].expected);
+    nl_test_free(&fdb);
+  }
+
+  p->vlan_filtering = 1;
+  return 1;
+}
+
+enum nl_test_ndm_field {
+  NL_NDM_NONE,
+  NL_NDM_FAMILY,
+  NL_NDM_IFINDEX,
+  NL_NDM_STATE,
+  NL_NDM_FLAGS,
+};
+
+struct nl_test_ndm {
+  enum nl_test_ndm_field field;
+  uint value;
+};
+
+static void
+nl_test_ndm_apply(struct ndmsg *n, const struct nl_test_ndm *m)
+{
+  switch (m->field)
+  {
+  case NL_NDM_NONE:	break;
+  case NL_NDM_FAMILY:	n->ndm_family = m->value; break;
+  case NL_NDM_IFINDEX:	n->ndm_ifindex = m->value; break;
+  case NL_NDM_STATE:	n->ndm_state = m->value; break;
+  case NL_NDM_FLAGS:	n->ndm_flags |= m->value; break;
+  }
+}
+
+static const byte nl_test_mac22[6] = { 0x02, 0, 0, 0, 0, 0x22 };
+static const byte nl_test_mac_short[5] = { 0x02, 0, 0, 0, 0 };
+static const byte nl_test_mac_mcast[6] = { 0x01, 0x00, 0x5e, 0, 0, 0x01 };
+static const byte nl_test_mac_bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+static const byte nl_test_mac_zero[6] = { 0 };
+static const u16 nl_test_u16_0 = 0;
+static const u16 nl_test_u16_4094 = 4094;
+static const u16 nl_test_u16_4095 = 4095;
+static const u16 nl_test_u16_max = 0xffff;
+static const byte nl_test_dst4[4] = { 192, 0, 2, 10 };
+
+#define NL_FDB_EXP	"kb scan 02:00:00:00:00:22 vlan 10 dev v0 static"
+
+/* Changed copies of the captured entry 02:00:00:00:00:22 dev v0 vlan 10
+ * master br0 static, in a scan of br0 unless async is set */
+static int
+t_parse_fdb_changed(void)
+{
+  static const struct {
+    const char *description;
+    int async;			/* As a notification, not in a scan */
+    int del;			/* As RTM_DELNEIGH */
+    int no_vlan_filtering;
+    struct nl_test_ndm ndm;
+    struct nl_test_attr attr;
+    uint msg_len;		/* Truncate the message to this length, 0 keeps it */
+    const char *expected;
+  } cases[] = {
+    /* Modes and sources */
+    { .description = "unchanged copy (positive)",
+      .expected = NL_FDB_EXP },
+    { .description = "notification of a new entry (positive)", .async = 1,
+      .expected = "kb add 02:00:00:00:00:22 vlan 10 dev v0 static" },
+    { .description = "notification of a deleted entry (positive)", .async = 1, .del = 1,
+      .expected = "kb del 02:00:00:00:00:22 vlan 10 static" },
+    { .description = "permanent: a local entry (positive)", .ndm = { NL_NDM_STATE, NUD_PERMANENT },
+      .expected = "kb scan 02:00:00:00:00:22 vlan 10 dev v0 local" },
+    { .description = "reachable: a learned entry (positive)", .ndm = { NL_NDM_STATE, NUD_REACHABLE },
+      .expected = "kb scan 02:00:00:00:00:22 vlan 10 dev v0 dynamic" },
+    { .description = "externally learned: BIRD's own entry (positive)", .ndm = { NL_NDM_FLAGS, NTF_EXT_LEARNED },
+      .expected = "kb scan 02:00:00:00:00:22 vlan 10 dev v0 bird" },
+
+    /* VLAN */
+    { .description = "no VLAN on a VLAN filtering bridge (negative)", .attr = { NDA_VLAN, NL_TEST_DROP },
+      .expected = "none" },
+    { .description = "no VLAN and no VLAN filtering (positive)", .no_vlan_filtering = 1, .attr = { NDA_VLAN, NL_TEST_DROP },
+      .expected = "kb scan 02:00:00:00:00:22 dev v0 static" },
+    { .description = "a VLAN and no VLAN filtering (negative)", .no_vlan_filtering = 1,
+      .expected = "none" },
+    { .description = "VLAN 0 is no VLAN (corner)", .attr = { NDA_VLAN, 2, &nl_test_u16_0 },
+      .expected = "none" },
+    { .description = "VLAN 4094, the highest valid (boundary)", .attr = { NDA_VLAN, 2, &nl_test_u16_4094 },
+      .expected = "kb scan 02:00:00:00:00:22 vlan 4094 dev v0 static" },
+    { .description = "VLAN 4095, reserved, is taken (boundary)", .attr = { NDA_VLAN, 2, &nl_test_u16_4095 },
+      .expected = "kb scan 02:00:00:00:00:22 vlan 4095 dev v0 static" },
+    { .description = "VLAN 65535 is taken (boundary)", .attr = { NDA_VLAN, 2, &nl_test_u16_max },
+      .expected = "kb scan 02:00:00:00:00:22 vlan 65535 dev v0 static" },
+    { .description = "VLAN of 4 bytes (negative)", .attr = { NDA_VLAN, 4, &nl_test_u32_3 },
+      .expected = "none" },
+
+    /* MAC address */
+    { .description = "no MAC address (negative)", .attr = { NDA_LLADDR, NL_TEST_DROP },
+      .expected = "none" },
+    { .description = "MAC address of 5 bytes (negative)", .attr = { NDA_LLADDR, 5, nl_test_mac_short },
+      .expected = "none" },
+    { .description = "multicast MAC address (negative)", .attr = { NDA_LLADDR, 6, nl_test_mac_mcast },
+      .expected = "none" },
+    { .description = "broadcast MAC address (negative)", .attr = { NDA_LLADDR, 6, nl_test_mac_bcast },
+      .expected = "none" },
+    { .description = "all-zero MAC address is unicast (corner)", .attr = { NDA_LLADDR, 6, nl_test_mac_zero },
+      .expected = "kb scan 00:00:00:00:00:00 vlan 10 dev v0 static" },
+
+    /* Bridge and port */
+    { .description = "no NDA_MASTER: the port's master is used (positive)", .attr = { NDA_MASTER, NL_TEST_DROP },
+      .expected = NL_FDB_EXP },
+    { .description = "NDA_MASTER not the port's master (negative)", .attr = { NDA_MASTER, 4, &nl_test_u32_7 },
+      .expected = "none" },
+    { .description = "NDA_MASTER of 2 bytes (negative)", .attr = { NDA_MASTER, 2, &nl_test_u16_0 },
+      .expected = "none" },
+    { .description = "on br0 itself, which has no master (negative)", .ndm = { NL_NDM_IFINDEX, 3 },
+      .expected = "none" },
+    { .description = "on v0p, outside the bridge (negative)", .ndm = { NL_NDM_IFINDEX, 4 },
+      .expected = "none" },
+    { .description = "on an unknown interface (negative)", .ndm = { NL_NDM_IFINDEX, 42 },
+      .expected = "none" },
+    { .description = "self entry on a port that is not VXLAN (negative)", .ndm = { NL_NDM_FLAGS, NTF_SELF },
+      .expected = "none" },
+    { .description = "NDA_DST on a bridge entry is ignored (corner)", .attr = { NDA_DST, 4, nl_test_dst4 },
+      .expected = NL_FDB_EXP },
+
+    /* Header */
+    { .description = "AF_INET neighbor (negative)", .ndm = { NL_NDM_FAMILY, AF_INET },
+      .expected = "none" },
+    { .description = "header only, no attributes (negative)", .msg_len = NLMSG_LENGTH(sizeof(struct ndmsg)),
+      .expected = "none" },
+    { .description = "shorter than the header (negative)", .msg_len = NLMSG_LENGTH(sizeof(struct ndmsg)) - 1,
+      .expected = "none" },
+  };
+
+  struct nl_test_capture fdb;
+  struct kbr_proto *p = nl_test_bridge_setup("fdb_show");
+  nl_test_load(&fdb, NL_TEST_BRMPLS "fdb_show/ip.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nlmsghdr *h = nl_test_copy(nl_test_find_fdb(&fdb, nl_test_mac22, 10), sizeof(struct ndmsg), &cases[i].attr);
+    h->nlmsg_type = cases[i].del ? RTM_DELNEIGH : RTM_NEWNEIGH;
+    nl_test_ndm_apply(NLMSG_DATA(h), &cases[i].ndm);
+
+    if (cases[i].msg_len)
+      h->nlmsg_len = cases[i].msg_len;
+
+    p->vlan_filtering = !cases[i].no_vlan_filtering;
+    nl_test_parse_fdb(h, !cases[i].async);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+    xfree(h);
+  }
+
+  p->vlan_filtering = 1;
+  nl_test_free(&fdb);
+
+  return 1;
+}
+
+/* The notifications `ip monitor all` saw while 02:00:00:00:00:21 was added
+ * to v0 on VLANs 1 and 10 and without a VLAN, then deleted, and v0p sent a
+ * frame from 02:00:00:00:00:12; here c0 is index 3, br0 4, v0p 5, v0 6 */
+static int
+t_parse_fdb_event(void)
+{
+  struct nl_test_capture events;
+  char got[4096];
+
+  nl_test_bridge_setup("fdb_event");
+  nl_test_load(&events, NL_TEST_BRMPLS "fdb_event/ip.pcap");
+
+  got[0] = 0;
+  for (uint i = 0; i < events.count; i++)
+  {
+    if ((events.msg[i]->nlmsg_type != RTM_NEWNEIGH) && (events.msg[i]->nlmsg_type != RTM_DELNEIGH))
+      continue;
+
+    nl_test_parse_fdb(events.msg[i], 0);
+    if (strcmp(nl_test_routes, "none"))
+      bsnprintf(got + strlen(got), sizeof(got) - strlen(got), "%s%s", got[0] ? "; " : "", nl_test_routes);
+  }
+
+  /* The entry without a VLAN and the AF_INET neighbor deleted on c0 are
+   * skipped */
+  const char *expected =
+    "kb add 02:00:00:00:00:21 vlan 1 dev v0 static; "
+    "kb add 02:00:00:00:00:21 vlan 10 dev v0 static; "
+    "kb del 02:00:00:00:00:21 vlan 1 static; "
+    "kb del 02:00:00:00:00:21 vlan 10 static; "
+    "kb add 02:00:00:00:00:12 vlan 1 dev v0 dynamic";
+  bt_assert_msg(!strcmp(got, expected), "FDB events: got \"%s\", expected \"%s\"", got, expected);
+  nl_test_free(&events);
+
+  return 1;
+}
+
+#endif
+
+
 int
 main(int argc, char *argv[])
 {
@@ -1832,6 +2254,11 @@ main(int argc, char *argv[])
 #ifdef HAVE_MPLS_KERNEL
   bt_test_suite(t_parse_mpls_capture, "MPLS routes and MPLS encapsulation from captures");
   bt_test_suite(t_parse_mpls_event, "MPLS route notifications from a capture");
+#endif
+#ifdef CONFIG_BRIDGE
+  bt_test_suite(t_parse_fdb_capture, "Bridge FDB entries from captured dumps");
+  bt_test_suite(t_parse_fdb_changed, "Bridge FDB entries with one field or attribute changed");
+  bt_test_suite(t_parse_fdb_event, "Bridge FDB notifications from a capture");
 #endif
 
   return bt_exit_value();
