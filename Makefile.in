@@ -173,9 +173,11 @@ $(objdir)/sysdep/paths.h: Makefile
 
 tests_targets_ok = $(addsuffix .ok,$(tests_targets))
 
+# A test that #includes a source file to reach its static functions sets
+# tests_exclude (target-specific) to that file's object
 $(tests_targets): %: %.o $(tests_objs) | prepare
 	$(E)echo LD $(LDFLAGS) -o $@ $< "..." $(LIBS)
-	$(Q)$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(Q)$(CC) $(LDFLAGS) -o $@ $(filter-out $(tests_exclude),$^) $(LIBS)
 
 # Hack to avoid problems with tests linking everything
 $(tests_targets): LIBS += $(DAEMON_LIBS)
