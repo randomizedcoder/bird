@@ -17,7 +17,45 @@
 #include "test/birdtest.h"
 #include "test/bt-utils.h"
 
+/* nl_parse_route() hands routes to these; record them instead */
+#define krt_got_route		nl_test_got_route
+#define krt_got_route_async	nl_test_got_route_async
+
+/* No netlink sockets and no scans of the host, see below */
+#define krt_sys_start		nl_test_unused_krt_sys_start
+#define krt_do_scan		nl_test_unused_krt_do_scan
+#define kif_sys_start		nl_test_unused_kif_sys_start
+#define kif_do_scan		nl_test_unused_kif_do_scan
+
 #include "sysdep/linux/netlink.c"
+
+#undef krt_got_route
+#undef krt_got_route_async
+#undef krt_sys_start
+#undef krt_do_scan
+#undef kif_sys_start
+#undef kif_do_scan
+
+int krt_sys_start(struct krt_proto *p);
+void krt_do_scan(struct krt_proto *p);
+void kif_sys_start(struct kif_proto *p);
+void kif_do_scan(struct kif_proto *p);
+
+/* Only register the kernel table, as the real one does before opening
+ * the sockets */
+int
+krt_sys_start(struct krt_proto *p)
+{
+  if (HASH_FIND(nl_table_map, RTH, p->af, krt_table_id(p)))
+    return 0;
+
+  HASH_INSERT2(nl_table_map, RTH, krt_pool, p);
+  return 1;
+}
+
+void krt_do_scan(struct krt_proto *p UNUSED) { }
+void kif_sys_start(struct kif_proto *p UNUSED) { }
+void kif_do_scan(struct kif_proto *p UNUSED) { }
 
 #define NL_TEST_DIR "sysdep/linux/test/"
 
@@ -145,13 +183,16 @@ struct nl_test_attr {
 };
 
 /* A copy of h with attribute change m applied (appended if h has no such
- * attribute), in an exactly sized buffer */
+ * attribute), padded as the kernel pads messages, in an exactly sized
+ * buffer */
 static struct nlmsghdr *
 nl_test_copy(struct nlmsghdr *h, uint hlen, const struct nl_test_attr *m)
 {
-  uint size = h->nlmsg_len + (m->len > 0 ? RTA_SPACE(m->len) : 0);
-  struct nlmsghdr *n = xmalloc(size);
+  uint size = NLMSG_ALIGN(h->nlmsg_len) + (m->len > 0 ? RTA_SPACE(m->len) : 0);
+  struct nlmsghdr *n = alloca(size);
   int found = 0;
+
+  memset(n, 0, size);
 
   memcpy(n, h, NLMSG_LENGTH(hlen));
   n->nlmsg_len = NLMSG_LENGTH(hlen);
@@ -178,7 +219,11 @@ nl_test_copy(struct nlmsghdr *h, uint hlen, const struct nl_test_attr *m)
   if (m->type && !found && (m->len >= 0))
     nl_add_attr(n, size, m->type, m->data, m->len);
 
-  return n;
+  n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len);
+
+  struct nlmsghdr *copy = xmalloc(n->nlmsg_len);
+  memcpy(copy, n, n->nlmsg_len);
+  return copy;
 }
 
 
@@ -795,6 +840,588 @@ t_parse_addr_changed(void)
 }
 
 
+/*
+ *	Routes
+ */
+
+/* Kernel protocols for the tables of the capture: main (254) and the VRF's
+ * table 100, both families. The local table (255) is left out. */
+#define NL_TEST_ROUTE_CONFIG						\
+  "router id 192.0.2.1;\n"						\
+  "ipv4 table t4v;\n"							\
+  "ipv6 table t6v;\n"							\
+  "protocol device { scan time 86400; }\n"				\
+  "protocol kernel k4 { ipv4 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k6 { ipv6 { import all; }; learn all; scan time 86400; }\n" \
+  "protocol kernel k4v { ipv4 { table t4v; import all; }; kernel table 100; learn all; scan time 86400; }\n" \
+  "protocol kernel k6v { ipv6 { table t6v; import all; }; kernel table 100; learn all; scan time 86400; }\n"
+
+/* What the parser handed to the kernel protocols, one route per entry,
+ * separated by "; " */
+static char nl_test_routes[4096];
+static char *nl_test_routes_pos;
+
+static void
+nl_test_routes_reset(void)
+{
+  nl_test_routes_pos = nl_test_routes;
+  bsnprintf(nl_test_routes, sizeof(nl_test_routes), "none");
+}
+
+#define NL_TEST_ROUTES_END	(nl_test_routes + sizeof(nl_test_routes))
+
+static void
+nl_test_routes_add(const char *fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+  nl_test_routes_pos += bvsnprintf(nl_test_routes_pos, NL_TEST_ROUTES_END - nl_test_routes_pos, fmt, args);
+  va_end(args);
+}
+
+/* "proto mode net source proto P metric M dest [next hops] [attributes]" */
+static void
+nl_test_record_route(struct krt_proto *p, rte *e, const char *mode, s8 src)
+{
+  static const char *srcs[] = {
+    [KRT_SRC_BIRD] = "bird",
+    [KRT_SRC_REDIRECT] = "redirect",
+    [KRT_SRC_ALIEN] = "alien",
+    [KRT_SRC_KERNEL] = "kernel",
+  };
+
+  static const char *dests[] = {
+    [RTD_UNICAST] = "unicast",
+    [RTD_BLACKHOLE] = "blackhole",
+    [RTD_UNREACHABLE] = "unreachable",
+    [RTD_PROHIBIT] = "prohibit",
+  };
+
+  static const char *metrics[KRT_METRICS_MAX] = {
+    [RTAX_LOCK] = "lock",
+    [RTAX_MTU] = "mtu",
+    [RTAX_WINDOW] = "window",
+    [RTAX_RTT] = "rtt",
+    [RTAX_RTTVAR] = "rttvar",
+    [RTAX_SSTHRESH] = "ssthresh",
+    [RTAX_CWND] = "cwnd",
+    [RTAX_ADVMSS] = "advmss",
+    [RTAX_REORDERING] = "reordering",
+    [RTAX_HOPLIMIT] = "hoplimit",
+    [RTAX_INITCWND] = "initcwnd",
+    [RTAX_FEATURES] = "features",
+    [RTAX_RTO_MIN] = "rto_min",
+    [RTAX_INITRWND] = "initrwnd",
+    [RTAX_QUICKACK] = "quickack",
+    [RTAX_CC_ALGO] = "congctl",
+    [RTAX_FASTOPEN_NO_COOKIE] = "fastopen_no_cookie",
+  };
+
+  rta *a = e->attrs;
+  eattr *ea;
+
+  if (nl_test_routes_pos != nl_test_routes)
+    nl_test_routes_add("; ");
+  else
+    nl_test_routes[0] = 0;
+
+  nl_test_routes_add("%s %s %N %s", p->p.name, mode, e->net->n.addr,
+		     ((src >= 0) && (src < (int) ARRAY_SIZE(srcs)) && srcs[src]) ? srcs[src] : "?");
+
+  if (ea = ea_find(a->eattrs, EA_KRT_SOURCE))
+    nl_test_routes_add(" proto %u", ea->u.data);
+
+  if (ea = ea_find(a->eattrs, EA_KRT_METRIC))
+    nl_test_routes_add(" metric %u", ea->u.data);
+
+  nl_test_routes_add(" %s", (a->dest < ARRAY_SIZE(dests)) && dests[a->dest] ? dests[a->dest] : "?");
+
+  if (a->dest == RTD_UNICAST)
+    for (struct nexthop *nh = &a->nh; nh; nh = nh->next)
+    {
+      if (ipa_nonzero(nh->gw))
+	nl_test_routes_add(" via %I", nh->gw);
+
+      nl_test_routes_add(" dev %s", nh->iface ? nh->iface->name : "?");
+
+      if (a->nh.next)
+	nl_test_routes_add(" weight %u", nh->weight + 1);
+
+      if (nh->flags & RNF_ONLINK)
+	nl_test_routes_add(" onlink");
+    }
+
+  if (ea = ea_find(a->eattrs, EA_KRT_SCOPE))
+    nl_test_routes_add(" scope %u", ea->u.data);
+
+  if (ea = ea_find(a->eattrs, EA_KRT_PREFSRC))
+    nl_test_routes_add(" prefsrc %I", *(ip_addr *) ea->u.ptr->data);
+
+  if (ea = ea_find(a->eattrs, EA_KRT_REALM))
+    nl_test_routes_add(" realm %u", ea->u.data);
+
+  for (uint t = 1; t < KRT_METRICS_MAX; t++)
+    if (ea = ea_find(a->eattrs, EA_KRT_METRICS + t))
+    {
+      if (t == RTAX_CC_ALGO)
+	nl_test_routes_add(" %s %s", metrics[t], (const char *) ea->u.ptr->data);
+      else
+	nl_test_routes_add(" %s %u", metrics[t], ea->u.data);
+    }
+}
+
+void nl_test_got_route(struct krt_proto *p, rte *e, s8 src);
+void nl_test_got_route_async(struct krt_proto *p, rte *e, int new, s8 src);
+
+void
+nl_test_got_route(struct krt_proto *p, rte *e, s8 src)
+{
+  nl_test_record_route(p, e, "scan", src);
+}
+
+void
+nl_test_got_route_async(struct krt_proto *p, rte *e, int new, s8 src)
+{
+  nl_test_record_route(p, e, new ? "add" : "del", src);
+}
+
+/* Destination and table of route message h, as "table N net" */
+static void
+nl_test_route_key(struct nlmsghdr *h, char *buf, uint size)
+{
+  struct rtmsg *r = NLMSG_DATA(h);
+  struct rtattr *a = nl_test_find_attr(h, sizeof(struct rtmsg), RTA_TABLE);
+  u32 table = a ? rta_get_u32(a) : r->rtm_table;
+
+  net_addr n;
+  a = nl_test_find_attr(h, sizeof(struct rtmsg), RTA_DST);
+
+  if (r->rtm_family == AF_INET)
+    net_fill_ip4(&n, a ? rta_get_ip4(a) : IP4_NONE, r->rtm_dst_len);
+  else
+    net_fill_ip6(&n, a ? rta_get_ip6(a) : IP6_NONE, r->rtm_dst_len);
+
+  /* Keep local and broadcast routes apart from unicast ones */
+  const char *type = (r->rtm_type == RTN_LOCAL) ? "local " :
+    (r->rtm_type == RTN_BROADCAST) ? "broadcast " :
+    (r->rtm_type == RTN_MULTICAST) ? "multicast " : "";
+
+  bsnprintf(buf, size, "table %u %s%N", table, type, &n);
+}
+
+/* The captured route message with key `key` (see nl_test_route_key()) */
+static struct nlmsghdr *
+nl_test_find_route(struct nl_test_capture *c, const char *key)
+{
+  for (uint i = 0; i < c->count; i++)
+  {
+    char buf[128];
+    if (c->msg[i]->nlmsg_type != RTM_NEWROUTE)
+      continue;
+
+    nl_test_route_key(c->msg[i], buf, sizeof(buf));
+    if (!strcmp(buf, key))
+      return c->msg[i];
+  }
+
+  bt_abort_msg("No route %s in the capture", key);
+  return NULL;
+}
+
+/* Kernel protocols up, the captured links and addresses known */
+static void
+nl_test_route_setup(void)
+{
+  struct nl_test_capture links, addrs;
+
+  bt_assert_msg(bt_config_parse(NL_TEST_ROUTE_CONFIG), "Route test config");
+
+  for (int i = 0; i < 256; i++)
+  {
+    if (EMPTY_LIST(global_event_list) && EMPTY_LIST(global_work_list))
+      break;
+
+    ev_run_list(&global_event_list);
+    ev_run_list(&global_work_list);
+  }
+
+  nl_test_load_links(&links);
+  nl_test_load(&addrs, "addr-dump.pcap");
+
+  for (uint i = 0; i < addrs.count; i++)
+    if (addrs.msg[i]->nlmsg_type == RTM_NEWADDR)
+      nl_parse_addr(addrs.msg[i], 0);
+
+  nl_test_free(&links);
+  nl_test_free(&addrs);
+}
+
+static void
+nl_test_parse_route(struct nlmsghdr *h, int scan)
+{
+  struct nl_parse_state s = {
+    .pool = nl_linpool,
+    .scan = scan,
+  };
+
+  nl_test_routes_reset();
+  nl_parse_route(&s, h);
+}
+
+static int
+nl_test_check_routes(const char *description, const char *expected)
+{
+  bt_assert_msg(!strcmp(nl_test_routes, expected), "%s: got \"%s\", expected \"%s\"",
+		description, nl_test_routes, expected);
+  return 1;
+}
+
+/* The routes of the capture, as `ip route show table all` printed them */
+static int
+t_parse_route_capture(void)
+{
+  static const struct {
+    const char *description;
+    const char *key;		/* See nl_test_route_key() */
+    const char *expected;
+  } cases[] = {
+    /* VRF table 100 */
+    { "198.18.11.0/24 dev goipv table 100 proto kernel scope link src 198.18.11.1",
+      "table 100 198.18.11.0/24",
+      "k4v scan 198.18.11.0/24 kernel proto 2 metric 0 unicast dev goipv scope 253 prefsrc 198.18.11.1" },
+    { "local 198.18.11.1 dev goipv table 100: local routes are skipped",
+      "table 100 local 198.18.11.1/32", "none" },
+    { "broadcast 198.18.11.255 dev goipv table 100: broadcast routes are skipped",
+      "table 100 broadcast 198.18.11.255/32", "none" },
+    { "local fe80::84da:71ff:fe5c:b3da dev goipv table 100: link scope, skipped",
+      "table 100 local fe80::84da:71ff:fe5c:b3da/128", "none" },
+    { "fe80::/64 dev goipv table 100: link scope, skipped",
+      "table 100 fe80::/64", "none" },
+    { "multicast ff00::/8 dev goipv table 100: multicast, skipped",
+      "table 100 multicast ff00::/8", "none" },
+
+    /* Main table */
+    { "192.0.2.0/24 dev goip0 proto kernel scope link src 192.0.2.1",
+      "table 254 192.0.2.0/24",
+      "k4 scan 192.0.2.0/24 kernel proto 2 metric 0 unicast dev goip0 scope 253 prefsrc 192.0.2.1" },
+    { "198.18.0.0/24 via 192.0.2.10 dev goip0",
+      "table 254 198.18.0.0/24",
+      "k4 scan 198.18.0.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { "198.18.1.0/24 via 192.0.2.10 dev goip0 mtu 1400 advmss 1300",
+      "table 254 198.18.1.0/24",
+      "k4 scan 198.18.1.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0 mtu 1400 advmss 1300" },
+    { "198.18.2.0/24 via inet6 2001:db8::2 dev goip0",
+      "table 254 198.18.2.0/24",
+      "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast via 2001:db8::2 dev goip0" },
+    { "198.18.3.0/24 nhid 1 via 192.0.2.10 dev goip0",
+      "table 254 198.18.3.0/24",
+      "k4 scan 198.18.3.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { "198.51.100.0/24 dev goip0 scope link",
+      "table 254 198.51.100.0/24",
+      "k4 scan 198.51.100.0/24 alien proto 3 metric 0 unicast dev goip0 scope 253" },
+    { "203.0.113.0/24 nexthop via 192.0.2.10 weight 1, nexthop via 192.0.2.11 weight 3, sorted",
+      "table 254 203.0.113.0/24",
+      "k4 scan 203.0.113.0/24 alien proto 3 metric 0 unicast via 192.0.2.11 dev goip0 weight 3 via 192.0.2.10 dev goip0 weight 1" },
+    { "2001:db8::/64 dev goip0 proto kernel metric 256",
+      "table 254 2001:db8::/64",
+      "k6 scan 2001:db8::/64 kernel proto 2 metric 256 unicast dev goip0" },
+    { "2001:db8:1::/64 via 2001:db8::2 dev goip0 metric 1024",
+      "table 254 2001:db8:1::/64",
+      "k6 scan 2001:db8:1::/64 alien proto 3 metric 1024 unicast via 2001:db8::2 dev goip0" },
+    { "2001:db8:2::/64 metric 1024 nexthop via 2001:db8::2 weight 1, nexthop via 2001:db8::3 weight 3, sorted",
+      "table 254 2001:db8:2::/64",
+      "k6 scan 2001:db8:2::/64 alien proto 3 metric 1024 unicast via 2001:db8::3 dev goip0 weight 3 via 2001:db8::2 dev goip0 weight 1" },
+    { "2001:db8:4::/64 from 2001:db8:5::/64 dev goip0: source prefix on a non-SADR channel, skipped",
+      "table 254 2001:db8:4::/64", "none" },
+    { "fe80::/64 dev goip0: link scope, skipped",
+      "table 254 fe80::/64", "none" },
+
+    /* Local table, which no kernel protocol is configured for */
+    { "local 127.0.0.0/8 dev lo table local",
+      "table 255 local 127.0.0.0/8", "none" },
+    { "local 127.0.0.1 dev lo table local",
+      "table 255 local 127.0.0.1/32", "none" },
+    { "broadcast 127.255.255.255 dev lo table local",
+      "table 255 broadcast 127.255.255.255/32", "none" },
+    { "local 192.0.2.1 dev goip0 table local",
+      "table 255 local 192.0.2.1/32", "none" },
+    { "broadcast 192.0.2.255 dev goip0 table local",
+      "table 255 broadcast 192.0.2.255/32", "none" },
+    { "local ::1 dev lo table local",
+      "table 255 local ::1/128", "none" },
+    { "local 2001:db8::1 dev goip0 table local",
+      "table 255 local 2001:db8::1/128", "none" },
+    { "local 2001:db8::9 dev goip0 table local",
+      "table 255 local 2001:db8::9/128", "none" },
+    { "local fe80::5c9c:8fff:fe0b:ceae dev goip0 table local",
+      "table 255 local fe80::5c9c:8fff:fe0b:ceae/128", "none" },
+    { "multicast ff00::/8 dev goip0 table local",
+      "table 255 multicast ff00::/8", "none" },
+  };
+
+  struct nl_test_capture routes;
+  nl_test_route_setup();
+  nl_test_load(&routes, "route-dump.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    nl_test_parse_route(nl_test_find_route(&routes, cases[i].key), 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+  }
+
+  /* Every captured route has a case */
+  for (uint i = 0; i < routes.count; i++)
+  {
+    char key[128];
+    if (routes.msg[i]->nlmsg_type != RTM_NEWROUTE)
+      continue;
+
+    nl_test_route_key(routes.msg[i], key, sizeof(key));
+
+    int found = 0;
+    for (uint j = 0; j < ARRAY_SIZE(cases); j++)
+      found |= !strcmp(cases[j].key, key);
+
+    bt_assert_msg(found, "No case for captured route %s", key);
+  }
+
+  nl_test_free(&routes);
+
+  return 1;
+}
+
+/* A field of struct rtmsg to change */
+enum nl_test_rtm_field {
+  NL_RTM_NONE,
+  NL_RTM_FAMILY,
+  NL_RTM_DST_LEN,
+  NL_RTM_TOS,
+  NL_RTM_PROTOCOL,
+  NL_RTM_TYPE,
+  NL_RTM_FLAGS,			/* Bits to set */
+};
+
+struct nl_test_rtm {
+  enum nl_test_rtm_field field;
+  uint value;
+};
+
+static void
+nl_test_rtm_apply(struct rtmsg *r, const struct nl_test_rtm *m)
+{
+  switch (m->field)
+  {
+  case NL_RTM_NONE:	break;
+  case NL_RTM_FAMILY:	r->rtm_family = m->value; break;
+  case NL_RTM_DST_LEN:	r->rtm_dst_len = m->value; break;
+  case NL_RTM_TOS:	r->rtm_tos = m->value; break;
+  case NL_RTM_PROTOCOL:	r->rtm_protocol = m->value; break;
+  case NL_RTM_TYPE:	r->rtm_type = m->value; break;
+  case NL_RTM_FLAGS:	r->rtm_flags |= m->value; break;
+  }
+}
+
+#define NL_V4		"table 254 198.18.0.0/24"
+#define NL_V4_EXP	"k4 scan 198.18.0.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0"
+#define NL_V4_VIA	"table 254 198.18.2.0/24"
+#define NL_V4_METRICS	"table 254 198.18.1.0/24"
+#define NL_V6		"table 254 2001:db8:1::/64"
+#define NL_V6_EXP	"k6 scan 2001:db8:1::/64 alien proto 3 metric 1024 unicast via 2001:db8::2 dev goip0"
+
+static const u32 nl_test_u32_3 = 3;
+static const u32 nl_test_u32_7 = 7;
+static const u32 nl_test_u32_42 = 42;
+static const u32 nl_test_u32_77 = 77;
+static const u32 nl_test_u32_100 = 100;
+static const u32 nl_test_u32_max = 0xffffffff;
+static const byte nl_test_gw4_offlink[4] = { 203, 0, 113, 1 };
+static const byte nl_test_gw4_self[4] = { 192, 0, 2, 1 };
+static const byte nl_test_dst4_mcast[4] = { 224, 0, 0, 0 };
+static const byte nl_test_gw6_v4mapped[16] = { [12] = 192, 0, 2, 10 };
+static const byte nl_test_gw6_ll[16] = { 0xfe, 0x80, [15] = 1 };
+
+/* struct rtvia: a host order u16 family, then the address */
+static const byte nl_test_via4[6] = { AF_INET, 0, 192, 0, 2, 10 };
+static const byte nl_test_via6_short[6] = { AF_INET6, 0, 0x20, 0x01, 0x0d, 0xb8 };
+static const byte nl_test_via_family[2] = { AF_INET6, 0 };
+static const byte nl_test_via_unknown[6] = { AF_PACKET, 0, 192, 0, 2, 10 };
+
+/* Nested RTA_METRICS attributes: struct rtattr (u16 length, u16 type), data */
+static const byte nl_test_metrics_cc[] = {
+  10, 0, RTAX_CC_ALGO, 0, 'c', 'u', 'b', 'i', 'c', 0, 0, 0,
+};
+static const byte nl_test_metrics_cc_unterminated[] = {
+  9, 0, RTAX_CC_ALGO, 0, 'c', 'u', 'b', 'i', 'c', 0, 0, 0,
+};
+static const byte nl_test_metrics_lock[] = {
+  8, 0, RTAX_LOCK, 0, 1 << RTAX_MTU, 0, 0, 0,
+  8, 0, RTAX_MTU, 0, 0xdc, 0x05, 0, 0,
+};
+static const byte nl_test_metrics_short[] = {
+  6, 0, RTAX_MTU, 0, 0xdc, 0x05, 0, 0,
+};
+static const byte nl_test_metrics_unknown[] = {
+  8, 0, 0x7f, 0, 1, 0, 0, 0,
+};
+
+/* Changed copies of captured routes, through a kernel protocol scan
+ * unless async is set */
+static int
+t_parse_route_changed(void)
+{
+  static const struct {
+    const char *description;
+    const char *base;		/* Captured route to start from, see nl_test_route_key() */
+    int async;			/* As a notification, not in a scan */
+    int del;			/* As RTM_DELROUTE */
+    struct nl_test_rtm rtm;
+    struct nl_test_attr attr;
+    uint msg_len;		/* Truncate the message to this length, 0 keeps it */
+    const char *expected;
+  } cases[] = {
+    /* Sources and modes */
+    { .description = "unchanged copy (positive)", .base = NL_V4,
+      .expected = NL_V4_EXP },
+    { .description = "notification of a new route (positive)", .base = NL_V4, .async = 1,
+      .expected = "k4 add 198.18.0.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "notification of a removed route (positive)", .base = NL_V4, .async = 1, .del = 1,
+      .expected = "k4 del 198.18.0.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "RTM_DELROUTE in a scan is ignored (negative)", .base = NL_V4, .del = 1,
+      .expected = "none" },
+    { .description = "proto kernel (positive)", .base = NL_V4, .rtm = { NL_RTM_PROTOCOL, RTPROT_KERNEL },
+      .expected = "k4 scan 198.18.0.0/24 kernel proto 2 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "proto redirect (positive)", .base = NL_V4, .rtm = { NL_RTM_PROTOCOL, RTPROT_REDIRECT },
+      .expected = "k4 scan 198.18.0.0/24 redirect proto 1 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "proto bird in a scan is our own route (positive)", .base = NL_V4, .rtm = { NL_RTM_PROTOCOL, RTPROT_BIRD },
+      .expected = "k4 scan 198.18.0.0/24 bird proto 12 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "proto bird notification is our own echo (negative)", .base = NL_V4, .async = 1, .rtm = { NL_RTM_PROTOCOL, RTPROT_BIRD },
+      .expected = "none" },
+    { .description = "proto unspec is ignored (negative)", .base = NL_V4, .rtm = { NL_RTM_PROTOCOL, RTPROT_UNSPEC },
+      .expected = "none" },
+    { .description = "proto 255, unknown to BIRD, is alien (boundary)", .base = NL_V4, .rtm = { NL_RTM_PROTOCOL, 255 },
+      .expected = "k4 scan 198.18.0.0/24 alien proto 255 metric 0 unicast via 192.0.2.10 dev goip0" },
+
+    /* Route types and flags */
+    { .description = "blackhole (positive)", .base = NL_V4, .rtm = { NL_RTM_TYPE, RTN_BLACKHOLE },
+      .expected = "k4 scan 198.18.0.0/24 alien proto 3 metric 0 blackhole" },
+    { .description = "unreachable (positive)", .base = NL_V4, .rtm = { NL_RTM_TYPE, RTN_UNREACHABLE },
+      .expected = "k4 scan 198.18.0.0/24 alien proto 3 metric 0 unreachable" },
+    { .description = "prohibit (positive)", .base = NL_V4, .rtm = { NL_RTM_TYPE, RTN_PROHIBIT },
+      .expected = "k4 scan 198.18.0.0/24 alien proto 3 metric 0 prohibit" },
+    { .description = "throw is not supported (negative)", .base = NL_V4, .rtm = { NL_RTM_TYPE, RTN_THROW },
+      .expected = "none" },
+    { .description = "TOS is not supported (negative)", .base = NL_V4, .rtm = { NL_RTM_TOS, 4 },
+      .expected = "none" },
+    { .description = "cloned route is ignored (negative)", .base = NL_V4, .rtm = { NL_RTM_FLAGS, RTM_F_CLONED },
+      .expected = "none" },
+    { .description = "dead next hop is ignored (negative)", .base = NL_V4, .rtm = { NL_RTM_FLAGS, RTNH_F_DEAD },
+      .expected = "none" },
+    { .description = "onlink next hop (positive)", .base = NL_V4, .rtm = { NL_RTM_FLAGS, RTNH_F_ONLINK },
+      .expected = "k4 scan 198.18.0.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0 onlink" },
+    { .description = "unknown address family (negative)", .base = NL_V4, .rtm = { NL_RTM_FAMILY, AF_PACKET },
+      .expected = "none" },
+
+    /* Destination */
+    { .description = "/32 (boundary)", .base = NL_V4, .rtm = { NL_RTM_DST_LEN, 32 },
+      .expected = "k4 scan 198.18.0.0/32 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "default route, no RTA_DST (boundary)", .base = NL_V4, .rtm = { NL_RTM_DST_LEN, 0 }, .attr = { RTA_DST, NL_TEST_DROP },
+      .expected = "k4 scan 0.0.0.0/0 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "multicast destination (negative)", .base = NL_V4, .attr = { RTA_DST, 4, nl_test_dst4_mcast },
+      .expected = "none" },
+    { .description = "3 byte RTA_DST (negative)", .base = NL_V4, .attr = { RTA_DST, 3, nl_test_dst4_mcast },
+      .expected = "none" },
+
+    /* Tables, interface and next hop */
+    { .description = "RTA_TABLE 100 goes to that table's protocol (positive)", .base = NL_V4, .attr = { RTA_TABLE, 4, &nl_test_u32_100 },
+      .expected = "k4v scan 198.18.0.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "unknown table (negative)", .base = NL_V4, .attr = { RTA_TABLE, 4, &nl_test_u32_42 },
+      .expected = "none" },
+    { .description = "unknown output interface (negative)", .base = NL_V4, .attr = { RTA_OIF, 4, &nl_test_u32_77 },
+      .expected = "none" },
+    { .description = "no output interface (negative)", .base = NL_V4, .attr = { RTA_OIF, NL_TEST_DROP },
+      .expected = "none" },
+    { .description = "gateway not on the link (negative)", .base = NL_V4, .attr = { RTA_GATEWAY, 4, nl_test_gw4_offlink },
+      .expected = "none" },
+    { .description = "gateway is our own address (negative)", .base = NL_V4, .attr = { RTA_GATEWAY, 4, nl_test_gw4_self },
+      .expected = "none" },
+
+    /* Attributes */
+    { .description = "metric 2^32-1 (boundary)", .base = NL_V4, .attr = { RTA_PRIORITY, 4, &nl_test_u32_max },
+      .expected = "k4 scan 198.18.0.0/24 alien proto 3 metric 4294967295 unicast via 192.0.2.10 dev goip0" },
+    { .description = "preferred source (positive)", .base = NL_V4, .attr = { RTA_PREFSRC, 4, nl_test_gw4_self },
+      .expected = NL_V4_EXP " prefsrc 192.0.2.1" },
+    { .description = "realm (positive)", .base = NL_V4, .attr = { RTA_FLOW, 4, &nl_test_u32_7 },
+      .expected = NL_V4_EXP " realm 7" },
+    { .description = "congestion control algorithm (positive)", .base = NL_V4_METRICS, .attr = { RTA_METRICS, sizeof(nl_test_metrics_cc), nl_test_metrics_cc },
+      .expected = "k4 scan 198.18.1.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0 congctl cubic" },
+    { .description = "locked MTU (positive)", .base = NL_V4_METRICS, .attr = { RTA_METRICS, sizeof(nl_test_metrics_lock), nl_test_metrics_lock },
+      .expected = "k4 scan 198.18.1.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0 lock 4 mtu 1500" },
+    { .description = "empty RTA_METRICS (boundary)", .base = NL_V4_METRICS, .attr = { RTA_METRICS, 0, NULL },
+      .expected = "k4 scan 198.18.1.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "unknown metric is ignored (corner)", .base = NL_V4_METRICS, .attr = { RTA_METRICS, sizeof(nl_test_metrics_unknown), nl_test_metrics_unknown },
+      .expected = "k4 scan 198.18.1.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "2 byte metric (negative)", .base = NL_V4_METRICS, .attr = { RTA_METRICS, sizeof(nl_test_metrics_short), nl_test_metrics_short },
+      .expected = "none" },
+    { .description = "unterminated congestion control algorithm (negative)", .base = NL_V4_METRICS, .attr = { RTA_METRICS, sizeof(nl_test_metrics_cc_unterminated), nl_test_metrics_cc_unterminated },
+      .expected = "none" },
+
+    /* RTA_VIA */
+    { .description = "RTA_VIA with an IPv6 next hop (positive)", .base = NL_V4_VIA,
+      .expected = "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast via 2001:db8::2 dev goip0" },
+    { .description = "RTA_VIA with an IPv4 next hop (positive)", .base = NL_V4_VIA, .attr = { RTA_VIA, sizeof(nl_test_via4), nl_test_via4 },
+      .expected = "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev goip0" },
+    { .description = "RTA_VIA with a short IPv6 address gives no next hop (negative)", .base = NL_V4_VIA, .attr = { RTA_VIA, sizeof(nl_test_via6_short), nl_test_via6_short },
+      .expected = "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast dev goip0" },
+    { .description = "RTA_VIA with only the family gives no next hop (boundary)", .base = NL_V4_VIA, .attr = { RTA_VIA, sizeof(nl_test_via_family), nl_test_via_family },
+      .expected = "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast dev goip0" },
+    { .description = "empty RTA_VIA gives no next hop (boundary)", .base = NL_V4_VIA, .attr = { RTA_VIA, 0, NULL },
+      .expected = "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast dev goip0" },
+    { .description = "RTA_VIA with an unknown family gives no next hop (corner)", .base = NL_V4_VIA, .attr = { RTA_VIA, sizeof(nl_test_via_unknown), nl_test_via_unknown },
+      .expected = "k4 scan 198.18.2.0/24 alien proto 3 metric 0 unicast dev goip0" },
+
+    /* Truncated */
+    { .description = "message one byte shorter than struct rtmsg (negative)", .base = NL_V4,
+      .msg_len = NLMSG_LENGTH(sizeof(struct rtmsg)) - 1, .expected = "none" },
+    { .description = "message with struct rtmsg and no attributes (boundary)", .base = NL_V4,
+      .msg_len = NLMSG_LENGTH(sizeof(struct rtmsg)), .expected = "none" },
+
+    /* IPv6 */
+    { .description = "IPv6 unchanged copy (positive)", .base = NL_V6,
+      .expected = NL_V6_EXP },
+    { .description = "IPv6 /128 (boundary)", .base = NL_V6, .rtm = { NL_RTM_DST_LEN, 128 },
+      .expected = "k6 scan 2001:db8:1::/128 alien proto 3 metric 1024 unicast via 2001:db8::2 dev goip0" },
+    { .description = "IPv6 link-local gateway (positive)", .base = NL_V6, .attr = { RTA_GATEWAY, 16, nl_test_gw6_ll },
+      .expected = "k6 scan 2001:db8:1::/64 alien proto 3 metric 1024 unicast via fe80::1 dev goip0" },
+    { .description = "IPv6 gateway in ::/96, as 6to4 tunnels have, is skipped (corner)", .base = NL_V6, .attr = { RTA_GATEWAY, 16, nl_test_gw6_v4mapped },
+      .expected = "none" },
+    { .description = "IPv6 with an input interface (negative)", .base = NL_V6, .attr = { RTA_IIF, 4, &nl_test_u32_3 },
+      .expected = "none" },
+  };
+
+  struct nl_test_capture routes;
+  nl_test_route_setup();
+  nl_test_load(&routes, "route-dump.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nlmsghdr *h = nl_test_copy(nl_test_find_route(&routes, cases[i].base), sizeof(struct rtmsg), &cases[i].attr);
+    h->nlmsg_type = cases[i].del ? RTM_DELROUTE : RTM_NEWROUTE;
+    nl_test_rtm_apply(NLMSG_DATA(h), &cases[i].rtm);
+
+    if (cases[i].msg_len)
+      h->nlmsg_len = cases[i].msg_len;
+
+    nl_test_parse_route(h, !cases[i].async);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+    xfree(h);
+  }
+
+  nl_test_free(&routes);
+
+  return 1;
+}
+
+
 int
 main(int argc, char *argv[])
 {
@@ -813,6 +1440,8 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_link_update, "Changes to known links");
   bt_test_suite(t_parse_addr_capture, "Addresses from a captured address dump");
   bt_test_suite(t_parse_addr_changed, "Addresses with one field or attribute changed");
+  bt_test_suite(t_parse_route_capture, "Routes from a captured route dump");
+  bt_test_suite(t_parse_route_changed, "Routes with one field or attribute changed");
 
   return bt_exit_value();
 }

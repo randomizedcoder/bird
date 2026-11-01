@@ -13,6 +13,8 @@ documentation addresses only (RFC 5737, RFC 3849, RFC 2544).
 
   link-dump.pcap    netlink_route_getlink.pcap, "ip link show"
   addr-dump.pcap    netlink_route_getaddr.pcap, "ip addr show"
+  route-dump.pcap   netlink_route_getroute_table_all.pcap,
+                    "ip route show table all"
 
 The VM had these interfaces:
 
@@ -23,6 +25,18 @@ The VM had these interfaces:
   4 goipvrf   vrf (table 100), mtu 65575, 4a:53:32:ed:29:e2
   5 goipv     dummy, master goipvrf, mtu 1500, 86:da:71:5c:b3:da
                 198.18.11.1/24
+
+Its routes, besides the connected and local ones:
+
+  198.18.0.0/24 via 192.0.2.10 dev goip0
+  198.18.1.0/24 via 192.0.2.10 dev goip0 mtu 1400 advmss 1300
+  198.18.2.0/24 via inet6 2001:db8::2 dev goip0
+  198.18.3.0/24 nhid 1 via 192.0.2.10 dev goip0
+  198.51.100.0/24 dev goip0 scope link
+  203.0.113.0/24 nexthop via 192.0.2.10 weight 1 nexthop via 192.0.2.11 weight 3
+  2001:db8:1::/64 via 2001:db8::2 dev goip0 metric 1024
+  2001:db8:2::/64 nexthop via 2001:db8::2 weight 1 nexthop via 2001:db8::3 weight 3
+  2001:db8:4::/64 from 2001:db8:5::/64 dev goip0
 
 Netlink messages are in host byte order, so the tests of the captures
 are skipped on big-endian hosts.
