@@ -2227,6 +2227,448 @@ t_parse_fdb_event(void)
   return 1;
 }
 
+
+
+/*
+ *	Bridge VLANs
+ */
+
+void nl_test_got_vlan(struct kbr_proto *p, struct iface *i, uint vid, uint flags);
+void nl_test_got_vlan_tunnel(struct kbr_proto *p, struct iface *i, uint vid, uint vni, uint flags);
+
+static void
+nl_test_record_vlan_flags(uint flags)
+{
+  static const struct { uint flag; const char *name; } names[] = {
+    { BRIDGE_VLAN_INFO_MASTER, "master" },
+    { BRIDGE_VLAN_INFO_PVID, "pvid" },
+    { BRIDGE_VLAN_INFO_UNTAGGED, "untagged" },
+    { BRIDGE_VLAN_INFO_RANGE_BEGIN, "range-begin" },
+    { BRIDGE_VLAN_INFO_RANGE_END, "range-end" },
+  };
+
+  for (uint j = 0; j < ARRAY_SIZE(names); j++)
+    if (flags & names[j].flag)
+      nl_test_routes_add(" %s", names[j].name);
+}
+
+/* "proto vlan V dev D [flags]" */
+void
+nl_test_got_vlan(struct kbr_proto *p, struct iface *i, uint vid, uint flags)
+{
+  if (nl_test_routes_pos != nl_test_routes)
+    nl_test_routes_add("; ");
+  else
+    nl_test_routes[0] = 0;
+
+  nl_test_routes_add("%s vlan %u dev %s", p->p.name, vid, i->name);
+  nl_test_record_vlan_flags(flags);
+}
+
+/* "proto vlan V dev D vni N [flags]" */
+void
+nl_test_got_vlan_tunnel(struct kbr_proto *p, struct iface *i, uint vid, uint vni, uint flags)
+{
+  if (nl_test_routes_pos != nl_test_routes)
+    nl_test_routes_add("; ");
+  else
+    nl_test_routes[0] = 0;
+
+  nl_test_routes_add("%s vlan %u dev %s vni %u", p->p.name, vid, i->name, vni);
+  nl_test_record_vlan_flags(flags);
+}
+
+/* The AF_BRIDGE link message of interface name in capture c */
+static struct nlmsghdr *
+nl_test_find_brlink(struct nl_test_capture *c, const char *name)
+{
+  for (uint i = 0; i < c->count; i++)
+    if ((c->msg[i]->nlmsg_type == RTM_NEWLINK) &&
+	(((struct ifinfomsg *) NLMSG_DATA(c->msg[i]))->ifi_family == AF_BRIDGE) &&
+	!strcmp(nl_test_link_name(c->msg[i]), name))
+      return c->msg[i];
+
+  bt_abort_msg("No AF_BRIDGE link %s in the capture", name);
+  return NULL;
+}
+
+/* Parse link message h as a VLAN scan of bridge_id does */
+static void
+nl_test_parse_vlan(struct nlmsghdr *h, uint bridge_id)
+{
+  struct nl_parse_state s = {
+    .pool = nl_linpool,
+    .scan = 1,
+    .bridge_id = bridge_id,
+  };
+
+  nl_test_routes_reset();
+  nl_parse_vlan(&s, h);
+}
+
+/* The AF_BRIDGE entries of `bridge vlan show` (vlan_show's
+ * netlink_route_getlink_brvlan.pcap); br0 is index 3, v0p 4 and v0 5:
+ *
+ *   br0   1 PVID Egress Untagged
+ *         10
+ *   v0    1 Egress Untagged
+ *         10
+ *         20 Egress Untagged     (and each of 21 to 30)
+ *         40 PVID Egress Untagged
+ *
+ * The kernel lists every VLAN on its own, as BIRD does not ask for ranges.
+ * br0's own entry has IFLA_MASTER br0, so its VLANs are taken as those of
+ * a port. */
+static int
+t_parse_vlan_capture(void)
+{
+  static const struct {
+    const char *description;
+    int vlan_filtering;
+    int other_bridge;		/* Scan of a bridge with another index */
+    const char *expected;
+  } cases[] = {
+    { "VLAN filtering: br0's VLANs and v0's (positive, br0's a corner)", 1, 0,
+      "kb vlan 1 dev br0 pvid untagged; kb vlan 10 dev br0; "
+      "kb vlan 1 dev v0 untagged; kb vlan 10 dev v0; "
+      "kb vlan 20 dev v0 untagged; kb vlan 21 dev v0 untagged; kb vlan 22 dev v0 untagged; "
+      "kb vlan 23 dev v0 untagged; kb vlan 24 dev v0 untagged; kb vlan 25 dev v0 untagged; "
+      "kb vlan 26 dev v0 untagged; kb vlan 27 dev v0 untagged; kb vlan 28 dev v0 untagged; "
+      "kb vlan 29 dev v0 untagged; kb vlan 30 dev v0 untagged; "
+      "kb vlan 40 dev v0 pvid untagged" },
+    { "no VLAN filtering: none (negative)", 0, 0,
+      "" },
+    { "scan of another bridge: none (negative)", 1, 1,
+      "" },
+  };
+
+  struct nl_test_capture vlans;
+  struct kbr_proto *p = nl_test_bridge_setup("vlan_show");
+  nl_test_load(&vlans, NL_TEST_BRMPLS "vlan_show/netlink_route_getlink_brvlan.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    char got[4096];
+    got[0] = 0;
+
+    p->vlan_filtering = cases[i].vlan_filtering;
+    for (uint j = 0; j < vlans.count; j++)
+    {
+      if (vlans.msg[j]->nlmsg_type != RTM_NEWLINK)
+	continue;
+
+      nl_test_parse_vlan(vlans.msg[j], kbr_bridge_id(p) + cases[i].other_bridge);
+      if (strcmp(nl_test_routes, "none"))
+	bsnprintf(got + strlen(got), sizeof(got) - strlen(got), "%s%s", got[0] ? "; " : "", nl_test_routes);
+    }
+
+    bt_assert_msg(!strcmp(got, cases[i].expected), "%s: got \"%s\", expected \"%s\"",
+		  cases[i].description, got, cases[i].expected);
+  }
+
+  p->vlan_filtering = 1;
+  nl_test_free(&vlans);
+
+  return 1;
+}
+
+/* An attribute of an IFLA_AF_SPEC list, see nl_test_vlan_spec() */
+struct nl_test_spec {
+  u16 type;
+  u16 len;
+  const void *data;
+};
+
+#define NL_TEST_MAX_SPEC 4
+
+/* Write attributes e into buf, as an IFLA_AF_SPEC payload, and return its
+ * length */
+static uint
+nl_test_vlan_spec(byte *buf, uint size, const struct nl_test_spec *e)
+{
+  uint pos = 0;
+
+  for (uint i = 0; (i < NL_TEST_MAX_SPEC) && e[i].type; i++)
+  {
+    struct rtattr *a = (struct rtattr *) (buf + pos);
+    ASSERT(pos + RTA_SPACE(e[i].len) <= size);
+
+    memset(a, 0, RTA_SPACE(e[i].len));
+    a->rta_type = e[i].type;
+    a->rta_len = RTA_LENGTH(e[i].len);
+    if (e[i].len)
+      memcpy(RTA_DATA(a), e[i].data, e[i].len);
+    pos += RTA_SPACE(e[i].len);
+  }
+
+  return pos;
+}
+
+enum nl_test_ifi_field {
+  NL_IFI_NONE,
+  NL_IFI_FAMILY,
+  NL_IFI_INDEX,
+};
+
+static const struct bridge_vlan_info nl_test_vi10 = { .vid = 10 };
+static const struct bridge_vlan_info nl_test_vi1_pvid = { .flags = BRIDGE_VLAN_INFO_PVID | BRIDGE_VLAN_INFO_UNTAGGED, .vid = 1 };
+static const struct bridge_vlan_info nl_test_vi0 = { .vid = 0 };
+static const struct bridge_vlan_info nl_test_vi4094 = { .vid = 4094 };
+static const struct bridge_vlan_info nl_test_vi4095 = { .vid = 4095 };
+static const struct bridge_vlan_info nl_test_vi_begin = { .flags = BRIDGE_VLAN_INFO_RANGE_BEGIN, .vid = 20 };
+static const struct bridge_vlan_info nl_test_vi_end = { .flags = BRIDGE_VLAN_INFO_RANGE_END, .vid = 30 };
+static const struct bridge_vlan_info nl_test_vi_master = { .flags = BRIDGE_VLAN_INFO_MASTER, .vid = 10 };
+static const byte nl_test_vi_short[2] = { 0, 0 };
+
+/* IFLA_BRIDGE_VLAN_TUNNEL_INFO payloads, little-endian */
+static const byte nl_test_tun_vni100[] = {
+  8, 0, IFLA_BRIDGE_VLAN_TUNNEL_ID, 0, 100, 0, 0, 0,
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_VID, 0, 10, 0, 0, 0,
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_FLAGS, 0, 0, 0, 0, 0,
+};
+static const byte nl_test_tun_no_id[] = {
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_VID, 0, 10, 0, 0, 0,
+};
+static const byte nl_test_tun_short_id[] = {
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_ID, 0, 100, 0, 0, 0,
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_VID, 0, 10, 0, 0, 0,
+};
+static const byte nl_test_tun_range[] = {
+  8, 0, IFLA_BRIDGE_VLAN_TUNNEL_ID, 0, 0xff, 0xff, 0xff, 0,
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_VID, 0, 20, 0, 0, 0,
+  6, 0, IFLA_BRIDGE_VLAN_TUNNEL_FLAGS, 0, BRIDGE_VLAN_INFO_RANGE_BEGIN, 0, 0, 0,
+};
+
+#define NL_VI(x)	{ IFLA_BRIDGE_VLAN_INFO, sizeof(struct bridge_vlan_info), &x }
+#define NL_TUN(x)	{ IFLA_BRIDGE_VLAN_TUNNEL_INFO, sizeof(x), x }
+
+/* Changed copies of v0's captured AF_BRIDGE entry, in a scan of br0;
+ * IFLA_AF_SPEC is replaced by spec when given */
+static int
+t_parse_vlan_changed(void)
+{
+  static const struct {
+    const char *description;
+    const char *link;		/* "v0" unless given */
+    int del;			/* As RTM_DELLINK */
+    int no_vlan_filtering;
+    enum nl_test_ifi_field ifi;
+    uint ifi_value;
+    struct nl_test_attr attr;
+    struct nl_test_spec spec[NL_TEST_MAX_SPEC];
+    const char *expected;
+  } cases[] = {
+    /* VLAN info */
+    { .description = "one VLAN (positive)", .spec = { NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev v0" },
+    { .description = "PVID, untagged (positive)", .spec = { NL_VI(nl_test_vi1_pvid) },
+      .expected = "kb vlan 1 dev v0 pvid untagged" },
+    { .description = "two VLANs, in order (positive)", .spec = { NL_VI(nl_test_vi1_pvid), NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 1 dev v0 pvid untagged; kb vlan 10 dev v0" },
+    { .description = "the master flag is passed on (corner)", .spec = { NL_VI(nl_test_vi_master) },
+      .expected = "kb vlan 10 dev v0 master" },
+    { .description = "VLAN 0 is passed on (boundary)", .spec = { NL_VI(nl_test_vi0) },
+      .expected = "kb vlan 0 dev v0" },
+    { .description = "VLAN 4094, the highest valid (boundary)", .spec = { NL_VI(nl_test_vi4094) },
+      .expected = "kb vlan 4094 dev v0" },
+    { .description = "VLAN 4095, reserved, is passed on (boundary)", .spec = { NL_VI(nl_test_vi4095) },
+      .expected = "kb vlan 4095 dev v0" },
+    { .description = "a range comes as its two ends only, which BIRD does not ask for (corner)",
+      .spec = { NL_VI(nl_test_vi_begin), NL_VI(nl_test_vi_end) },
+      .expected = "kb vlan 20 dev v0 range-begin; kb vlan 30 dev v0 range-end" },
+    { .description = "VLAN info of 2 bytes is skipped (negative)",
+      .spec = { { IFLA_BRIDGE_VLAN_INFO, 2, nl_test_vi_short } },
+      .expected = "none" },
+    { .description = "VLAN info of 2 bytes, the next one is still taken (corner)",
+      .spec = { { IFLA_BRIDGE_VLAN_INFO, 2, nl_test_vi_short }, NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev v0" },
+    { .description = "VLAN info of 8 bytes is skipped (negative)",
+      .spec = { { IFLA_BRIDGE_VLAN_INFO, 8, nl_test_tun_vni100 }, NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev v0" },
+    { .description = "unknown attribute in the list is ignored (corner)",
+      .spec = { { IFLA_BRIDGE_MODE, 2, &nl_test_u16_0 }, NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev v0" },
+    { .description = "empty list (boundary)", .attr = { IFLA_AF_SPEC, 0, NULL },
+      .expected = "none" },
+
+    /* Tunnel info */
+    { .description = "VLAN 10 mapped to VNI 100 (positive)", .spec = { NL_TUN(nl_test_tun_vni100) },
+      .expected = "kb vlan 10 dev v0 vni 100" },
+    { .description = "tunnel info without an ID is VNI 0 (corner)", .spec = { NL_TUN(nl_test_tun_no_id) },
+      .expected = "kb vlan 10 dev v0 vni 0" },
+    { .description = "tunnel ID of 2 bytes, the entry is skipped (negative)",
+      .spec = { NL_TUN(nl_test_tun_short_id), NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev v0" },
+    { .description = "the highest VNI on a range start (boundary)", .spec = { NL_TUN(nl_test_tun_range) },
+      .expected = "kb vlan 20 dev v0 vni 16777215 range-begin" },
+    { .description = "empty tunnel info is VLAN 0, VNI 0 (corner)",
+      .spec = { { IFLA_BRIDGE_VLAN_TUNNEL_INFO, 0, NULL } },
+      .expected = "kb vlan 0 dev v0 vni 0" },
+
+    /* Bridge and port */
+    { .description = "no IFLA_MASTER (negative)", .attr = { IFLA_MASTER, NL_TEST_DROP },
+      .expected = "none" },
+    { .description = "IFLA_MASTER of another bridge (negative)", .attr = { IFLA_MASTER, 4, &nl_test_u32_7 },
+      .expected = "none" },
+    { .description = "IFLA_MASTER of 2 bytes, the message is rejected (negative)", .attr = { IFLA_MASTER, 2, &nl_test_u16_0 },
+      .expected = "none" },
+    { .description = "no IFLA_AF_SPEC (negative)", .attr = { IFLA_AF_SPEC, NL_TEST_DROP },
+      .expected = "none" },
+    { .description = "no VLAN filtering (negative)", .no_vlan_filtering = 1,
+      .expected = "none" },
+    { .description = "on an unknown interface (negative)", .ifi = NL_IFI_INDEX, .ifi_value = 42,
+      .expected = "none" },
+    { .description = "AF_UNSPEC link (negative)", .ifi = NL_IFI_FAMILY, .ifi_value = AF_UNSPEC,
+      .expected = "none" },
+    { .description = "br0's own entry, which names itself as master (corner)", .link = "br0",
+      .expected = "kb vlan 1 dev br0 pvid untagged; kb vlan 10 dev br0" },
+    { .description = "RTM_DELLINK is read like RTM_NEWLINK, scans have none (corner)", .del = 1,
+      .spec = { NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev v0" },
+  };
+
+  struct nl_test_capture vlans;
+  struct kbr_proto *p = nl_test_bridge_setup("vlan_show");
+  nl_test_load(&vlans, NL_TEST_BRMPLS "vlan_show/netlink_route_getlink_brvlan.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    byte spec[256];
+    struct nl_test_attr attr = cases[i].attr;
+
+    if (cases[i].spec[0].type)
+      attr = (struct nl_test_attr) { IFLA_AF_SPEC, nl_test_vlan_spec(spec, sizeof(spec), cases[i].spec), spec };
+
+    struct nlmsghdr *h = nl_test_copy(nl_test_find_brlink(&vlans, cases[i].link ?: "v0"), sizeof(struct ifinfomsg), &attr);
+    struct ifinfomsg *ifi = NLMSG_DATA(h);
+    h->nlmsg_type = cases[i].del ? RTM_DELLINK : RTM_NEWLINK;
+
+    if (cases[i].ifi == NL_IFI_FAMILY)
+      ifi->ifi_family = cases[i].ifi_value;
+    else if (cases[i].ifi == NL_IFI_INDEX)
+      ifi->ifi_index = cases[i].ifi_value;
+
+    p->vlan_filtering = !cases[i].no_vlan_filtering;
+    nl_test_parse_vlan(h, kbr_bridge_id(p));
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+    xfree(h);
+  }
+
+  p->vlan_filtering = 1;
+  nl_test_free(&vlans);
+
+  return 1;
+}
+
+/* The notifications `bridge monitor vlan` saw while VLANs 10 and 20-30 were
+ * added to v0 and 10 deleted (after the canary 4000) */
+static int
+t_parse_vlan_event(void)
+{
+  struct nl_test_capture events;
+  char got[4096];
+
+  nl_test_bridge_setup("vlan_event");
+  nl_test_load(&events, NL_TEST_BRMPLS "vlan_event/ip.pcap");
+
+  got[0] = 0;
+  uint n = 0;
+  for (uint i = 0; i < events.count; i++)
+  {
+    if ((events.msg[i]->nlmsg_type != RTM_NEWVLAN) && (events.msg[i]->nlmsg_type != RTM_DELVLAN))
+      continue;
+
+    nl_test_routes_reset();
+    nl_async_msg(events.msg[i]);
+    n++;
+    if (strcmp(nl_test_routes, "none"))
+      bsnprintf(got + strlen(got), sizeof(got) - strlen(got), "%s%s", got[0] ? "; " : "", nl_test_routes);
+  }
+
+  /* RTM_NEWVLAN and RTM_DELVLAN are not read; the VLANs come from scans */
+  bt_assert_msg(n == 4, "VLAN events: %u notifications, expected 4", n);
+  bt_assert_msg(!strcmp(got, ""), "VLAN events: got \"%s\", expected none", got);
+  nl_test_free(&events);
+
+  return 1;
+}
+
+/* br0's IFLA_LINKINFO with IFLA_INFO_DATA holding only data, little-endian */
+#define NL_TEST_BR_LINKINFO(...)					\
+  12, 0, IFLA_INFO_KIND, 0, 'b', 'r', 'i', 'd', 'g', 'e', 0, 0,	\
+  __VA_ARGS__
+
+static const byte nl_test_br_filtering1[] = { NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 5, 0, IFLA_BR_VLAN_FILTERING, 0, 1, 0, 0, 0) };
+static const byte nl_test_br_filtering0[] = { NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 5, 0, IFLA_BR_VLAN_FILTERING, 0, 0, 0, 0, 0) };
+static const byte nl_test_br_filtering_pad[] = { NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 5, 0, IFLA_BR_VLAN_FILTERING, 0, 1, 0xff, 0xff, 0xff) };
+static const byte nl_test_br_filtering_u32[] = { NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 8, 0, IFLA_BR_VLAN_FILTERING, 0, 1, 0, 0, 0) };
+static const byte nl_test_br_no_filtering[] = { NL_TEST_BR_LINKINFO(4, 0, IFLA_INFO_DATA, 0) };
+static const byte nl_test_br_no_data[] = { NL_TEST_BR_LINKINFO() };
+
+/* The links of the bridge rows: br0's VLAN filtering flag from its link
+ * message, and the AF_BRIDGE link notifications the kernel sends for the
+ * ports to the link group BIRD listens to */
+static int
+t_parse_bridge_link(void)
+{
+  static const struct {
+    const char *description;
+    const char *link;
+    int bridge;			/* The AF_BRIDGE message, not the AF_UNSPEC one */
+    int del;			/* As RTM_DELLINK */
+    struct nl_test_attr attr;
+    const char *expected;
+  } cases[] = {
+    /* IFLA_BR_VLAN_FILTERING, a u8 */
+    { "br0 as captured: a bridge with VLAN filtering (positive)", "br0", 0, 0, {},
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering on (positive)", "br0", 0, 0, { IFLA_LINKINFO, sizeof(nl_test_br_filtering1), nl_test_br_filtering1 },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering off (positive)", "br0", 0, 0, { IFLA_LINKINFO, sizeof(nl_test_br_filtering0), nl_test_br_filtering0 },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 0 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering on, the padding after it set (corner)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_filtering_pad), nl_test_br_filtering_pad },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering of 4 bytes is not taken (negative)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_filtering_u32), nl_test_br_filtering_u32 },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge lladdr 56:6f:f3:24:7b:da" },
+    { "no VLAN filtering attribute (negative)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_no_filtering), nl_test_br_no_filtering },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge lladdr 56:6f:f3:24:7b:da" },
+    { "no IFLA_INFO_DATA: not even a bridge (corner)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_no_data), nl_test_br_no_data },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast lladdr 56:6f:f3:24:7b:da" },
+
+    /* AF_BRIDGE notifications */
+    { "v0's AF_BRIDGE RTM_NEWLINK leaves v0 as it is (positive)", "v0", 1, 0, {},
+      "v0 index 5 mtu 1500 admin-up multiaccess broadcast multicast master br0 lladdr 56:6f:f3:24:7b:da" },
+  };
+
+  struct nl_test_capture links, vlans;
+  nl_test_bridge_setup("vlan_show");
+  nl_test_load(&links, NL_TEST_BRMPLS "vlan_show/netlink_route_getlink.pcap");
+  nl_test_load(&vlans, NL_TEST_BRMPLS "vlan_show/netlink_route_getlink_brvlan.pcap");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    nl_test_load_ns("vlan_show");
+
+    struct nlmsghdr *base = cases[i].bridge ?
+      nl_test_find_brlink(&vlans, cases[i].link) : nl_test_find_link(&links, cases[i].link);
+    struct nlmsghdr *h = nl_test_copy(base, sizeof(struct ifinfomsg), &cases[i].attr);
+    h->nlmsg_type = cases[i].del ? RTM_DELLINK : RTM_NEWLINK;
+
+    nl_async_msg(h);
+    nl_test_check_iface(cases[i].description, if_find_by_name(cases[i].link), cases[i].expected);
+    xfree(h);
+  }
+
+  nl_test_free(&links);
+  nl_test_free(&vlans);
+
+  return 1;
+}
+
 #endif
 
 
@@ -2259,6 +2701,10 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_fdb_capture, "Bridge FDB entries from captured dumps");
   bt_test_suite(t_parse_fdb_changed, "Bridge FDB entries with one field or attribute changed");
   bt_test_suite(t_parse_fdb_event, "Bridge FDB notifications from a capture");
+  bt_test_suite(t_parse_vlan_capture, "Bridge VLANs from a captured dump");
+  bt_test_suite(t_parse_vlan_changed, "Bridge VLANs with one attribute changed");
+  bt_test_suite(t_parse_vlan_event, "Bridge VLAN notifications from a capture");
+  bt_test_suite(t_parse_bridge_link, "Bridge links and AF_BRIDGE link notifications");
 #endif
 
   return bt_exit_value();

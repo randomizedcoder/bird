@@ -77,6 +77,14 @@ is outside the bridge:
   fdb_event/ip.pcap, "ip monitor all" while 02:00:00:00:00:21 is added
   and deleted, then a frame from v0p; here a dummy interface c0 comes
   first, so br0 is index 4, v0p 5 and v0 6
+  vlan_show/netlink_route_getlink_brvlan.pcap, "bridge vlan show", the
+  AF_BRIDGE link dump BIRD's VLAN scan reads, after VLAN 10, 20-30
+  untagged and 40 pvid untagged were added to v0 and 10 to br0:
+    br0  1 PVID Egress Untagged, 10
+    v0   1 Egress Untagged, 10, 20-30 Egress Untagged (one entry each),
+         40 PVID Egress Untagged
+  vlan_event/ip.pcap, "bridge monitor vlan" while VLAN 4000, 10 and 20-30
+  were added to v0 and 10 deleted: RTM_NEWVLAN and RTM_DELVLAN only
 
 Netlink messages are in host byte order, so the tests of the captures
 are skipped on big-endian hosts.
