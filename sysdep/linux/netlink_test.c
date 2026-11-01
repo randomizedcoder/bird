@@ -57,6 +57,10 @@ void nl_test_log_rl(struct tbf *rl, const char *msg, ...);
 #undef kbr_do_fdb_scan
 #undef kbr_do_vlan_scan
 
+#ifdef HAVE_MPLS_KERNEL
+#include <linux/mpls_iptunnel.h>
+#endif
+
 int krt_sys_start(struct krt_proto *p);
 void krt_do_scan(struct krt_proto *p);
 void kif_sys_start(struct kif_proto *p);
@@ -634,8 +638,8 @@ t_parse_link_bridge(void)
       NL_BR_IFACE " vlan-filtering 0" },
     { "VLAN filtering 255 is passed on (boundary)", 1, 255, 0,
       NL_BR_IFACE " vlan-filtering 255" },
-    { "VLAN filtering of 4 bytes is not taken (negative)", 4, 1, 0,
-      NL_BR_IFACE },
+    { "VLAN filtering of 4 bytes, a malformed message (negative)", 4, 1, 0,
+      "none" },
     { "no VLAN filtering attribute (negative)", 0, 0, 0,
       NL_BR_IFACE },
   };
@@ -645,6 +649,10 @@ t_parse_link_bridge(void)
     struct nlmsghdr *h = nl_test_bridge_msg(cases[i].len, cases[i].value, cases[i].pad);
     nl_parse_link(h, 0);
     nl_test_check_iface(cases[i].description, if_find_by_index(50), cases[i].expected);
+
+    /* Gone again, so that each row starts without nb0 */
+    h->nlmsg_type = RTM_DELLINK;
+    nl_parse_link(h, 0);
     xfree(h);
   }
 
@@ -735,6 +743,129 @@ t_parse_link_kinds(void)
 
     nl_test_free(&c);
   }
+
+  return 1;
+}
+
+/* vx0's IFLA_LINKINFO with IFLA_INFO_DATA holding only data, little-endian */
+#define NL_TEST_VX_KIND		10, 0, IFLA_INFO_KIND, 0, 'v', 'x', 'l', 'a', 'n', 0, 0, 0
+#define NL_TEST_VX_ID42		8, 0, IFLA_VXLAN_ID, 0, 42, 0, 0, 0
+#define NL_TEST_VX_LOCAL	8, 0, IFLA_VXLAN_LOCAL, 0, 192, 0, 2, 1
+#define NL_TEST_VX_LOCAL6	20, 0, IFLA_VXLAN_LOCAL6, 0, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
+
+static const byte nl_test_vx_local[] = { NL_TEST_VX_KIND, 20, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42, NL_TEST_VX_LOCAL };
+static const byte nl_test_vx_local6[] = { NL_TEST_VX_KIND, 32, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42, NL_TEST_VX_LOCAL6 };
+static const byte nl_test_vx_both[] = {
+  NL_TEST_VX_KIND, 40, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42, NL_TEST_VX_LOCAL6, NL_TEST_VX_LOCAL,
+};
+static const byte nl_test_vx_id_max[] = {
+  NL_TEST_VX_KIND, 32, 0, IFLA_INFO_DATA, 0, 8, 0, IFLA_VXLAN_ID, 0, 0xff, 0xff, 0xff, 0,
+  20, 0, IFLA_VXLAN_LOCAL6, 0, [43] = 0,
+};
+static const byte nl_test_vx_id0[] = { NL_TEST_VX_KIND, 12, 0, IFLA_INFO_DATA, 0, 8, 0, IFLA_VXLAN_ID, 0, 0, 0, 0, 0 };
+static const byte nl_test_vx_unknown[] = {
+  NL_TEST_VX_KIND, 36, 0, IFLA_INFO_DATA, 0,
+  8, 0, IFLA_VXLAN_GROUP, 0, 239, 1, 1, 1,
+  6, 0, IFLA_VXLAN_PORT, 0, 0x12, 0xb5, 0, 0,
+  NL_TEST_VX_ID42,
+  5, 0, 99, 0, 1, 0, 0, 0,
+};
+static const byte nl_test_vx_no_data[] = { NL_TEST_VX_KIND, 4, 0, IFLA_INFO_DATA, 0 };
+static const byte nl_test_vx_id_short[] = { NL_TEST_VX_KIND, 12, 0, IFLA_INFO_DATA, 0, 6, 0, IFLA_VXLAN_ID, 0, 42, 0, 0, 0 };
+static const byte nl_test_vx_local6_short[] = {
+  NL_TEST_VX_KIND, 20, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42, 8, 0, IFLA_VXLAN_LOCAL6, 0, 0x20, 0x01, 0x0d, 0xb8,
+};
+static const byte nl_test_vx_local6_short_first[] = {
+  NL_TEST_VX_KIND, 20, 0, IFLA_INFO_DATA, 0, 8, 0, IFLA_VXLAN_LOCAL6, 0, 0x20, 0x01, 0x0d, 0xb8, NL_TEST_VX_ID42,
+};
+static const byte nl_test_vx_local_long[] = {
+  NL_TEST_VX_KIND, 32, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42,
+  20, 0, IFLA_VXLAN_LOCAL, 0, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+};
+static const byte nl_test_vx_data_remnant[] = {
+  NL_TEST_VX_KIND, 23, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42, NL_TEST_VX_LOCAL, 0xaa, 0xbb, 0xcc, 0,
+};
+static const byte nl_test_vx_linkinfo_remnant[] = {
+  NL_TEST_VX_KIND, 12, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42, 0xaa, 0xbb, 0xcc,
+};
+static const byte nl_test_vx_data_overrun[] = { NL_TEST_VX_KIND, 16, 0, IFLA_INFO_DATA, 0, NL_TEST_VX_ID42 };
+
+#define NL_VX_IFACE	"vx0 index 3 mtu 1500 multiaccess broadcast multicast"
+#define NL_VX_LLADDR	" lladdr 26:26:85:4f:60:77"
+
+/*
+ * kinds/vxlan/add_local's vx0 with its IFLA_LINKINFO replaced. The kernel
+ * sends nested attributes of the sizes BIRD expects; the others make a
+ * malformed message.
+ */
+static int
+t_parse_link_vxlan(void)
+{
+  static const struct {
+    const char *description;
+    struct nl_test_attr attr;
+    const char *expected;
+  } cases[] = {
+    { "vx0 as captured, with attributes BIRD does not read (positive)", {},
+      NL_VX_IFACE " vxlan vni 42 learning 1 local 10.0.0.1" NL_VX_LLADDR },
+    { "VNI and an IPv4 local address (positive)", { IFLA_LINKINFO, sizeof(nl_test_vx_local), nl_test_vx_local },
+      NL_VX_IFACE " vxlan vni 42 local 192.0.2.1" NL_VX_LLADDR },
+    { "VNI and an IPv6 local address (positive)", { IFLA_LINKINFO, sizeof(nl_test_vx_local6), nl_test_vx_local6 },
+      NL_VX_IFACE " vxlan vni 42 local 2001:db8::1" NL_VX_LLADDR },
+    { "VNI 2^24-1 and local address :: (boundary)", { IFLA_LINKINFO, sizeof(nl_test_vx_id_max), nl_test_vx_id_max },
+      NL_VX_IFACE " vxlan vni 16777215 local ::" NL_VX_LLADDR },
+    { "VNI 0 (boundary)", { IFLA_LINKINFO, sizeof(nl_test_vx_id0), nl_test_vx_id0 },
+      NL_VX_IFACE " vxlan vni 0" NL_VX_LLADDR },
+    { "IPv4 and IPv6 local addresses, the IPv4 one is taken (corner)", { IFLA_LINKINFO, sizeof(nl_test_vx_both), nl_test_vx_both },
+      NL_VX_IFACE " vxlan vni 42 local 192.0.2.1" NL_VX_LLADDR },
+    { "attributes BIRD does not read, of any size (corner)", { IFLA_LINKINFO, sizeof(nl_test_vx_unknown), nl_test_vx_unknown },
+      NL_VX_IFACE " vxlan vni 42" NL_VX_LLADDR },
+    { "empty IFLA_INFO_DATA (corner)", { IFLA_LINKINFO, sizeof(nl_test_vx_no_data), nl_test_vx_no_data },
+      NL_VX_IFACE " vxlan" NL_VX_LLADDR },
+    { "VNI of 2 bytes, a malformed message (negative)", { IFLA_LINKINFO, sizeof(nl_test_vx_id_short), nl_test_vx_id_short },
+      "none" },
+    { "IPv6 local address of 4 bytes after the VNI (negative)", { IFLA_LINKINFO, sizeof(nl_test_vx_local6_short), nl_test_vx_local6_short },
+      "none" },
+    { "IPv6 local address of 4 bytes before the VNI (negative)",
+      { IFLA_LINKINFO, sizeof(nl_test_vx_local6_short_first), nl_test_vx_local6_short_first },
+      "none" },
+    { "IPv6 address in the IPv4 local address (negative)", { IFLA_LINKINFO, sizeof(nl_test_vx_local_long), nl_test_vx_local_long },
+      "none" },
+    { "3 bytes left over in IFLA_INFO_DATA (negative)", { IFLA_LINKINFO, sizeof(nl_test_vx_data_remnant), nl_test_vx_data_remnant },
+      "none" },
+    { "3 bytes left over in IFLA_LINKINFO (negative)",
+      { IFLA_LINKINFO, sizeof(nl_test_vx_linkinfo_remnant), nl_test_vx_linkinfo_remnant },
+      "none" },
+    { "IFLA_INFO_DATA longer than IFLA_LINKINFO (negative)", { IFLA_LINKINFO, sizeof(nl_test_vx_data_overrun), nl_test_vx_data_overrun },
+      "none" },
+  };
+
+  struct nl_test_capture c;
+  nl_test_load(&c, "kinds/vxlan/add_local/netlink_route_getlink_detail.pcap");
+
+  /* The last one: ip first looks the link up by name */
+  struct nlmsghdr *base = NULL;
+  for (uint j = 0; j < c.count; j++)
+    if ((c.msg[j]->nlmsg_type == RTM_NEWLINK) && !strcmp(nl_test_link_name(c.msg[j]), "vx0"))
+      base = c.msg[j];
+
+  if (!base)
+    bt_abort_msg("No link vx0 in the capture");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nlmsghdr *h = nl_test_copy(base, sizeof(struct ifinfomsg), &cases[i].attr);
+    nl_parse_link(h, 0);
+    nl_test_check_iface(cases[i].description, if_find_by_index(3), cases[i].expected);
+
+    /* Gone again, from the captured message, for the next row */
+    base->nlmsg_type = RTM_DELLINK;
+    nl_parse_link(base, 0);
+    base->nlmsg_type = RTM_NEWLINK;
+    xfree(h);
+  }
+
+  nl_test_free(&c);
 
   return 1;
 }
@@ -2251,6 +2382,121 @@ t_parse_mpls_event(void)
   return 1;
 }
 
+/* RTA_ENCAP of an MPLS encapsulation: nested MPLS_IPTUNNEL_DST, the label
+ * stack in network order (label << 12, bottom of stack bit) */
+#define NL_TEST_ENC_100_200	12, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x06, 0x40, 0x00, 0x00, 0x0c, 0x81, 0x00
+#define NL_TEST_ENC_300		8, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x12, 0xc1, 0x00
+
+static const byte nl_test_enc4_ttl[] = { NL_TEST_ENC_100_200, 5, 0, MPLS_IPTUNNEL_TTL, 0, 64, 0, 0, 0 };
+static const byte nl_test_enc4_remnant[] = { NL_TEST_ENC_100_200, 0xaa, 0xbb, 0xcc };
+static const byte nl_test_enc4_overrun[] = { 16, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x06, 0x40, 0x00, 0x00, 0x0c, 0x81, 0x00 };
+static const byte nl_test_enc6_ttl0[] = { NL_TEST_ENC_300, 5, 0, MPLS_IPTUNNEL_TTL, 0, 0, 0, 0, 0 };
+static const byte nl_test_enc6_remnant[] = { NL_TEST_ENC_300, 0xaa, 0xbb };
+static const byte nl_test_enc6_overrun[] = { 8, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x12, 0xc1, 0x00, 8, 0, MPLS_IPTUNNEL_TTL, 0, 64 };
+
+/* 198.18.21.0/24's RTA_MULTIPATH: next hops via 192.0.2.10 and .11 dev d0
+ * (index 3), each with RTA_GATEWAY, RTA_ENCAP and RTA_ENCAP_TYPE MPLS */
+#define NL_TEST_MP_NH(len, gw)	len, 0, 0, 0, 3, 0, 0, 0, 8, 0, RTA_GATEWAY, 0, 192, 0, 2, gw
+#define NL_TEST_MP_ENCAP_TYPE	6, 0, RTA_ENCAP_TYPE, 0, LWTUNNEL_ENCAP_MPLS, 0, 0, 0
+#define NL_TEST_MP_FIRST	NL_TEST_MP_NH(36, 10), 12, 0, RTA_ENCAP, 0, 8, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x06, 0x51, 0x00, NL_TEST_MP_ENCAP_TYPE
+
+static const byte nl_test_mp_enc_remnant[] = {
+  NL_TEST_MP_FIRST,
+  NL_TEST_MP_NH(40, 11), 15, 0, RTA_ENCAP, 0, 8, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x06, 0x61, 0x00, 0xaa, 0xbb, 0xcc, 0,
+  NL_TEST_MP_ENCAP_TYPE,
+};
+static const byte nl_test_mp_enc_overrun[] = {
+  NL_TEST_MP_FIRST,
+  NL_TEST_MP_NH(36, 11), 12, 0, RTA_ENCAP, 0, 12, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x06, 0x61, 0x00,
+  NL_TEST_MP_ENCAP_TYPE,
+};
+static const byte nl_test_mp_enc_ttl[] = {
+  NL_TEST_MP_FIRST,
+  NL_TEST_MP_NH(44, 11), 20, 0, RTA_ENCAP, 0, 8, 0, MPLS_IPTUNNEL_DST, 0, 0x00, 0x06, 0x61, 0x00,
+  5, 0, MPLS_IPTUNNEL_TTL, 0, 1, 0, 0, 0,
+  NL_TEST_MP_ENCAP_TYPE,
+};
+
+#define NL_ENC4		"table 254 198.18.20.0/24"
+#define NL_ENC4_EXP	"k4 scan 198.18.20.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0"
+#define NL_ENC6		"table 254 2001:db8:20::/64"
+#define NL_ENC6_EXP	"k6 scan 2001:db8:20::/64 alien proto 3 metric 1024 unicast via 2001:db8::10 dev d0"
+#define NL_ENC_MP	"table 254 198.18.21.0/24"
+#define NL_ENC_MP_EXP	"k4 scan 198.18.21.0/24 alien proto 3 metric 0 unicast via 192.0.2.10 dev d0 labels 101 weight 1 via 192.0.2.11 dev d0"
+
+/*
+ * route_encap_show's routes with their nested MPLS encapsulation changed.
+ * The kernel sends it well formed; the others are malformed messages.
+ */
+static int
+t_parse_mpls_encap(void)
+{
+  static const struct {
+    const char *description;
+    const char *capture;
+    const char *base;		/* See nl_test_route_key() */
+    struct nl_test_attr attr;
+    const char *expected;
+  } cases[] = {
+    { "IPv4, as captured (positive)", "ip.pcap", NL_ENC4, {},
+      NL_ENC4_EXP " labels 100/200" },
+    { "IPv4, with MPLS_IPTUNNEL_TTL, which BIRD does not read (corner)", "ip.pcap", NL_ENC4,
+      { RTA_ENCAP, sizeof(nl_test_enc4_ttl), nl_test_enc4_ttl },
+      NL_ENC4_EXP " labels 100/200" },
+    { "IPv4, empty RTA_ENCAP: no labels (boundary)", "ip.pcap", NL_ENC4, { RTA_ENCAP, 0, "" },
+      NL_ENC4_EXP },
+    { "IPv4, 3 bytes left over in RTA_ENCAP (negative)", "ip.pcap", NL_ENC4,
+      { RTA_ENCAP, sizeof(nl_test_enc4_remnant), nl_test_enc4_remnant },
+      "none" },
+    { "IPv4, MPLS_IPTUNNEL_DST longer than RTA_ENCAP (negative)", "ip.pcap", NL_ENC4,
+      { RTA_ENCAP, sizeof(nl_test_enc4_overrun), nl_test_enc4_overrun },
+      "none" },
+    { "IPv6, as captured (positive)", "netlink_route_getroute6.pcap", NL_ENC6, {},
+      NL_ENC6_EXP " labels 300" },
+    { "IPv6, with MPLS_IPTUNNEL_TTL 0 (corner)", "netlink_route_getroute6.pcap", NL_ENC6,
+      { RTA_ENCAP, sizeof(nl_test_enc6_ttl0), nl_test_enc6_ttl0 },
+      NL_ENC6_EXP " labels 300" },
+    { "IPv6, 2 bytes left over in RTA_ENCAP (negative)", "netlink_route_getroute6.pcap", NL_ENC6,
+      { RTA_ENCAP, sizeof(nl_test_enc6_remnant), nl_test_enc6_remnant },
+      "none" },
+    { "IPv6, MPLS_IPTUNNEL_TTL longer than RTA_ENCAP (negative)", "netlink_route_getroute6.pcap", NL_ENC6,
+      { RTA_ENCAP, sizeof(nl_test_enc6_overrun), nl_test_enc6_overrun },
+      "none" },
+    { "multipath, as captured (positive)", "ip.pcap", NL_ENC_MP, {},
+      NL_ENC_MP_EXP " labels 102 weight 1" },
+    { "multipath, the second next hop with MPLS_IPTUNNEL_TTL (corner)", "ip.pcap", NL_ENC_MP,
+      { RTA_MULTIPATH, sizeof(nl_test_mp_enc_ttl), nl_test_mp_enc_ttl },
+      NL_ENC_MP_EXP " labels 102 weight 1" },
+    { "multipath, 3 bytes left over in the second next hop's RTA_ENCAP (negative)", "ip.pcap", NL_ENC_MP,
+      { RTA_MULTIPATH, sizeof(nl_test_mp_enc_remnant), nl_test_mp_enc_remnant },
+      "none" },
+    { "multipath, the second next hop's MPLS_IPTUNNEL_DST longer than its RTA_ENCAP (negative)", "ip.pcap", NL_ENC_MP,
+      { RTA_MULTIPATH, sizeof(nl_test_mp_enc_overrun), nl_test_mp_enc_overrun },
+      "none" },
+  };
+
+  nl_test_mpls_setup();
+  nl_test_load_ns("route_encap_show");
+
+  for (uint i = 0; i < ARRAY_SIZE(cases); i++)
+  {
+    struct nl_test_capture routes;
+    char name[128];
+
+    bsnprintf(name, sizeof(name), NL_TEST_BRMPLS "route_encap_show/%s", cases[i].capture);
+    nl_test_load(&routes, name);
+
+    struct nlmsghdr *h = nl_test_copy(nl_test_find_route(&routes, cases[i].base), sizeof(struct rtmsg), &cases[i].attr);
+    nl_test_parse_route(h, 1);
+    nl_test_check_routes(cases[i].description, cases[i].expected);
+
+    xfree(h);
+    nl_test_free(&routes);
+  }
+
+  return 1;
+}
+
 #endif
 
 /*
@@ -3659,6 +3905,21 @@ static const byte nl_test_br_filtering_pad[] = { NL_TEST_BR_LINKINFO(12, 0, IFLA
 static const byte nl_test_br_filtering_u32[] = { NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 8, 0, IFLA_BR_VLAN_FILTERING, 0, 1, 0, 0, 0) };
 static const byte nl_test_br_no_filtering[] = { NL_TEST_BR_LINKINFO(4, 0, IFLA_INFO_DATA, 0) };
 static const byte nl_test_br_no_data[] = { NL_TEST_BR_LINKINFO() };
+static const byte nl_test_br_unknown[] = {
+  NL_TEST_BR_LINKINFO(28, 0, IFLA_INFO_DATA, 0,
+		      8, 0, IFLA_BR_FORWARD_DELAY, 0, 0xdc, 0x05, 0, 0,
+		      5, 0, IFLA_BR_VLAN_FILTERING, 0, 0, 0, 0, 0,
+		      6, 0, IFLA_BR_VLAN_PROTOCOL, 0, 0x81, 0x00, 0, 0)
+};
+static const byte nl_test_br_data_remnant[] = {
+  NL_TEST_BR_LINKINFO(15, 0, IFLA_INFO_DATA, 0, 5, 0, IFLA_BR_VLAN_FILTERING, 0, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0)
+};
+static const byte nl_test_br_linkinfo_remnant[] = {
+  NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 5, 0, IFLA_BR_VLAN_FILTERING, 0, 0, 0, 0, 0, 0xaa, 0xbb, 0xcc)
+};
+static const byte nl_test_br_filtering_overrun[] = {
+  NL_TEST_BR_LINKINFO(12, 0, IFLA_INFO_DATA, 0, 12, 0, IFLA_BR_VLAN_FILTERING, 0, 0, 0, 0, 0)
+};
 
 /* The links of the bridge rows: br0's VLAN filtering flag from its link
  * message, and the AF_BRIDGE link notifications the kernel sends for br0 and
@@ -3684,9 +3945,21 @@ t_parse_bridge_link(void)
     { "VLAN filtering on, the padding after it set (corner)", "br0", 0, 0,
       { IFLA_LINKINFO, sizeof(nl_test_br_filtering_pad), nl_test_br_filtering_pad },
       "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
-    { "VLAN filtering of 4 bytes is not taken (negative)", "br0", 0, 0,
+    { "VLAN filtering of 4 bytes, a malformed message (negative)", "br0", 0, 0,
       { IFLA_LINKINFO, sizeof(nl_test_br_filtering_u32), nl_test_br_filtering_u32 },
-      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge lladdr 56:6f:f3:24:7b:da" },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering off, 3 bytes left over in IFLA_INFO_DATA (negative)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_data_remnant), nl_test_br_data_remnant },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering off, 3 bytes left over in IFLA_LINKINFO (negative)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_linkinfo_remnant), nl_test_br_linkinfo_remnant },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering longer than IFLA_INFO_DATA (negative)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_filtering_overrun), nl_test_br_filtering_overrun },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 1 lladdr 56:6f:f3:24:7b:da" },
+    { "VLAN filtering off among attributes BIRD does not read (corner)", "br0", 0, 0,
+      { IFLA_LINKINFO, sizeof(nl_test_br_unknown), nl_test_br_unknown },
+      "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge vlan-filtering 0 lladdr 56:6f:f3:24:7b:da" },
     { "no VLAN filtering attribute (negative)", "br0", 0, 0,
       { IFLA_LINKINFO, sizeof(nl_test_br_no_filtering), nl_test_br_no_filtering },
       "br0 index 3 mtu 1500 admin-up multiaccess broadcast multicast bridge lladdr 56:6f:f3:24:7b:da" },
@@ -3751,6 +4024,7 @@ main(int argc, char *argv[])
   bt_test_suite(t_parse_link_changed, "Links with one attribute changed");
   bt_test_suite(t_parse_link_update, "Changes to known links");
   bt_test_suite(t_parse_link_kinds, "Links of other kinds from captures");
+  bt_test_suite(t_parse_link_vxlan, "VXLAN links with nested attributes changed");
   bt_test_suite(t_parse_addr_capture, "Addresses from a captured address dump");
   bt_test_suite(t_parse_addr_changed, "Addresses with one field or attribute changed");
   bt_test_suite(t_parse_addr_show, "Addresses of the addr-show captures");
@@ -3765,6 +4039,7 @@ main(int argc, char *argv[])
 #ifdef HAVE_MPLS_KERNEL
   bt_test_suite(t_parse_mpls_capture, "MPLS routes and MPLS encapsulation from captures");
   bt_test_suite(t_parse_mpls_event, "MPLS route notifications from a capture");
+  bt_test_suite(t_parse_mpls_encap, "MPLS encapsulation with nested attributes changed");
 #endif
 #ifdef CONFIG_BRIDGE
   bt_test_suite(t_parse_fdb_capture, "Bridge FDB entries from captured dumps");

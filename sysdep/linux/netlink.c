@@ -1003,7 +1003,9 @@ nl_parse_multipath(struct nl_parse_state *s, struct krt_proto *p, const net_addr
 
 	struct rtattr *enca[BIRD_RTA_MAX];
 	nl_attr_len = RTA_PAYLOAD(a[RTA_ENCAP]);
-	nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca));
+	if (!nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca)))
+	  goto err;
+
 	rv->labels = rta_get_mpls(enca[RTA_DST], rv->label);
       }
 #endif
@@ -1144,7 +1146,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
   {
     struct rtattr *li[BIRD_INFO_MAX];
     nl_attr_len = RTA_PAYLOAD(a[IFLA_LINKINFO]);
-    nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li));
+    if (!nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li)))
+      goto malformed;
 
     if (li[IFLA_INFO_KIND] && rta_is_str(li[IFLA_INFO_KIND]))
       kind = RTA_DATA(li[IFLA_INFO_KIND]);
@@ -1155,7 +1158,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       struct rtattr *data[BIRD_IFLA_BR_MAX];
       nl_attr_len = RTA_PAYLOAD(li[IFLA_INFO_DATA]);
-      nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_br_attr_want, data, sizeof(data));
+      if (!nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_br_attr_want, data, sizeof(data)))
+	goto malformed;
 
       if (data[IFLA_BR_VLAN_FILTERING])
       {
@@ -1169,7 +1173,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       struct rtattr *data[BIRD_IFLA_VXLAN_MAX];
       nl_attr_len = RTA_PAYLOAD(li[IFLA_INFO_DATA]);
-      nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_vxlan_attr_want, data, sizeof(data));
+      if (!nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_vxlan_attr_want, data, sizeof(data)))
+	goto malformed;
 
       if (data[IFLA_VXLAN_ID])
       {
@@ -1242,6 +1247,11 @@ nl_parse_link(struct nlmsghdr *h, int scan)
       if (!scan)
 	if_end_partial_update(ifi);
     }
+
+  return;
+
+malformed:
+  log(L_ERR "KIF: Malformed message received");
 }
 
 static void
@@ -2041,7 +2051,12 @@ nl_parse_route(struct nl_parse_state *s, struct nlmsghdr *h)
 	    {
 	      struct rtattr *enca[BIRD_RTA_MAX];
 	      nl_attr_len = RTA_PAYLOAD(a[RTA_ENCAP]);
-	      nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca));
+	      if (!nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca)))
+	      {
+		log(L_ERR "KRT: Received route %N with malformed encapsulation", net->n.addr);
+		return;
+	      }
+
 	      ra->nh.labels = rta_get_mpls(enca[RTA_DST], ra->nh.label);
 	      break;
 	    }
