@@ -652,10 +652,24 @@ static inline mac_addr rta_get_mac(struct rtattr *a)
 
 static inline ip_addr rta_get_via(struct rtattr *a)
 {
+  /* The address follows the 2 byte family, so it is not aligned */
   struct rtvia *v = RTA_DATA(a);
+  uint len = RTA_PAYLOAD(a);
+
+  if (len < sizeof(struct rtvia))
+    return IPA_NONE;
+
+  len -= sizeof(struct rtvia);
   switch(v->rtvia_family) {
-    case AF_INET:  return ipa_from_ip4(ip4_ntoh(*(ip4_addr *) v->rtvia_addr));
-    case AF_INET6: return ipa_from_ip6(ip6_ntoh(*(ip6_addr *) v->rtvia_addr));
+    case AF_INET:
+      if (len == sizeof(ip4_addr))
+	return ipa_from_ip4(get_ip4(v->rtvia_addr));
+      break;
+
+    case AF_INET6:
+      if (len == sizeof(ip6_addr))
+	return ipa_from_ip6(get_ip6(v->rtvia_addr));
+      break;
   }
   return IPA_NONE;
 }
