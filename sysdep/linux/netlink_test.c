@@ -3372,8 +3372,8 @@ nl_test_parse_vlan(struct nlmsghdr *h, uint bridge_id)
  *         40 PVID Egress Untagged
  *
  * The kernel lists every VLAN on its own, as BIRD does not ask for ranges.
- * br0's own entry has IFLA_MASTER br0, so its VLANs are taken as those of
- * a port. */
+ * br0's own entry has IFLA_MASTER br0; BIRD manages the VLANs of the ports
+ * only, so it is left out. */
 static int
 t_parse_vlan_capture(void)
 {
@@ -3383,8 +3383,7 @@ t_parse_vlan_capture(void)
     int other_bridge;		/* Scan of a bridge with another index */
     const char *expected;
   } cases[] = {
-    { "VLAN filtering: br0's VLANs and v0's (positive, br0's a corner)", 1, 0,
-      "kb vlan 1 dev br0 pvid untagged; kb vlan 10 dev br0; "
+    { "VLAN filtering: v0's VLANs, not br0's own (positive, br0's a corner)", 1, 0,
       "kb vlan 1 dev v0 untagged; kb vlan 10 dev v0; "
       "kb vlan 20 dev v0 untagged; kb vlan 21 dev v0 untagged; kb vlan 22 dev v0 untagged; "
       "kb vlan 23 dev v0 untagged; kb vlan 24 dev v0 untagged; kb vlan 25 dev v0 untagged; "
@@ -3575,8 +3574,20 @@ t_parse_vlan_changed(void)
       .expected = "none" },
     { .description = "AF_UNSPEC link (negative)", .ifi = NL_IFI_FAMILY, .ifi_value = AF_UNSPEC,
       .expected = "none" },
-    { .description = "br0's own entry, which names itself as master (corner)", .link = "br0",
-      .expected = "kb vlan 1 dev br0 pvid untagged; kb vlan 10 dev br0" },
+    { .description = "br0's own entry, which names itself as master, is left out (corner)", .link = "br0",
+      .expected = "none" },
+    { .description = "v0's entry under br0's index, as br0's own, is left out (corner)", .ifi = NL_IFI_INDEX, .ifi_value = 3,
+      .spec = { NL_VI(nl_test_vi10) },
+      .expected = "none" },
+    { .description = "br0's own entry with IFLA_MASTER of another bridge (negative)", .link = "br0",
+      .attr = { IFLA_MASTER, 4, &nl_test_u32_7 },
+      .expected = "none" },
+    { .description = "a port of index 1, lo (boundary)", .ifi = NL_IFI_INDEX, .ifi_value = 1,
+      .spec = { NL_VI(nl_test_vi10) },
+      .expected = "kb vlan 10 dev lo" },
+    { .description = "a port of index 2^31-1, unknown (boundary)", .ifi = NL_IFI_INDEX, .ifi_value = 0x7fffffff,
+      .spec = { NL_VI(nl_test_vi10) },
+      .expected = "none" },
     { .description = "RTM_DELLINK is read like RTM_NEWLINK, scans have none (corner)", .del = 1,
       .spec = { NL_VI(nl_test_vi10) },
       .expected = "kb vlan 10 dev v0" },

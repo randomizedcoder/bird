@@ -2554,6 +2554,10 @@ nl_parse_vlan(struct nl_parse_state *s, struct nlmsghdr *h)
 
   u32 bridge_id = rta_get_u32(a[IFLA_MASTER]);
 
+  /* The bridge's own entry; BIRD manages only its ports' VLANs */
+  if ((u32) i->ifi_index == bridge_id)
+    return;
+
   /* Should be filtered by kernel */
   if (s->bridge_id && (bridge_id != s->bridge_id))
     return;
