@@ -291,6 +291,66 @@ t_ip6_shift_right(void)
   return 1;
 }
 
+static int
+t_ip4_getbits(void)
+{
+  ip4_addr a = ip4_from_u32(0x8D0D8BDC);
+
+  struct { const char *description; uint pos, n; u32 expected; } test_vectors[] = {
+    { "first nibble",			 0,  4, 0x8 },
+    { "middle byte",			 8,  8, 0x0D },
+    { "last bit",			31,  1, 0x0 },
+    { "widest field (31 bits)",		 0, 31, 0x4686C5EE },
+    { "last byte",			24,  8, 0xDC },
+    { "zero bits at start",		 0,  0, 0 },
+    { "zero bits in middle",		17,  0, 0 },
+    { "zero bits at end",		32,  0, 0 },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(test_vectors); i++)
+  {
+    u32 got = ip4_getbits(a, test_vectors[i].pos, test_vectors[i].n);
+    bt_assert_msg(got == test_vectors[i].expected,
+		  "%s: ip4_getbits(pos=%u, n=%u) = 0x%x, expected 0x%x",
+		  test_vectors[i].description, test_vectors[i].pos, test_vectors[i].n,
+		  got, test_vectors[i].expected);
+  }
+
+  return 1;
+}
+
+static int
+t_ip6_getbits(void)
+{
+  ip6_addr a = ip6_build(0x8D0D8BDC, 0x1F04DB92, 0xE5117673, 0x70E54449);
+
+  struct { const char *description; uint pos, n; u32 expected; } test_vectors[] = {
+    { "first nibble",			  0,  4, 0x8 },
+    { "byte in second word",		 40,  8, 0x04 },
+    { "last bits of last word",		124,  4, 0x9 },
+    { "31 bits of first word",		  0, 31, 0x4686C5EE },
+    { "31 bits ending last word",		 97, 31, 0x70E54449 },
+    { "bit ending a word",		 31,  1, 0x0 },
+    { "bit starting a word",		 32,  1, 0x0 },
+    { "zero bits at start",		  0,  0, 0 },
+    { "zero bits at word boundary",	 32,  0, 0 },
+    { "zero bits at last word",		 96,  0, 0 },
+    { "zero bits past the end",		128,  0, 0 },
+    { "zero bits inside a word",	 77,  0, 0 },
+  };
+
+  for (uint i = 0; i < ARRAY_SIZE(test_vectors); i++)
+  {
+    u32 got = ip6_getbits(a, test_vectors[i].pos, test_vectors[i].n);
+    bt_assert_msg(got == test_vectors[i].expected,
+		  "%s: ip6_getbits(pos=%u, n=%u) = 0x%x, expected 0x%x",
+		  test_vectors[i].description, test_vectors[i].pos, test_vectors[i].n,
+		  got, test_vectors[i].expected);
+  }
+
+  return 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -304,6 +364,8 @@ main(int argc, char *argv[])
   bt_test_suite(t_ip6_prefix_equal, "Testing ip6_prefix_equal()");
   bt_test_suite(t_ip6_shift_left, "Testing ip6_shift_left()");
   bt_test_suite(t_ip6_shift_right, "Testing ip6_shift_right()");
+  bt_test_suite(t_ip4_getbits, "Testing ip4_getbits()");
+  bt_test_suite(t_ip6_getbits, "Testing ip6_getbits()");
 
   return bt_exit_value();
 }

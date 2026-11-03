@@ -1,0 +1,216 @@
+# nix/analysis/semgrep-rules.yaml
+#
+# C ruleset for BIRD, focused on wire-parsing hazards in the protocol code
+# (lengths read with get_u8/get_u16/get_u32 flowing into copies or
+# ADVANCE() unchecked), BIRD's own formatting/assert helpers, plus the
+# generic unsafe-libc set. Every rule has a fixture in semgrep-tests/
+# (ruleid: must match, ok: must not), run by semgrep.nix before the scan.
+rules:
+  # ── Packet-derived lengths ───────────────────────────────────────────
+  - id: wire-len-to-memcpy-unchecked
+    languages: [c]
+    severity: WARNING
+    message: >-
+      Length read from the wire (get_u8/get_u16/get_u32) is used as a copy
+      size with no comparison against a bound in between. Check it against
+      the remaining input and the destination size first.
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $L = get_u8($P);
+              ...
+          - pattern-inside: |
+              $L = get_u16($P);
+              ...
+          - pattern-inside: |
+              $L = get_u32($P);
+              ...
+          - pattern-inside: |
+              $T $L = get_u8($P);
+              ...
+          - pattern-inside: |
+              $T $L = get_u16($P);
+              ...
+          - pattern-inside: |
+              $T $L = get_u32($P);
+              ...
+      # A comparison involving $L before the copy (in the same or an
+      # enclosing block) counts as a bound check.
+      - pattern-not-inside: |
+          if (<... $L ...>) $STMT;
+          ...
+      - pattern-not-inside: |
+          if (<... $L ...>) $STMT; else $ELSE;
+          ...
+      - pattern-either:
+          - pattern: memcpy($D, $SRC, $L)
+          - pattern: memmove($D, $SRC, $L)
+          - pattern: bmemcpy($D, $SRC, $L)
+
+  - id: wire-len-advance-unchecked
+    languages: [c]
+    severity: WARNING
+    message: >-
+      ADVANCE() by a length read from the wire with no comparison against
+      the remaining length first. ADVANCE() subtracts from an unsigned
+      remainder, which wraps to a huge value when the length is too big.
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $L = get_u8($P);
+              ...
+          - pattern-inside: |
+              $L = get_u16($P);
+              ...
+          - pattern-inside: |
+              $T $L = get_u8($P);
+              ...
+          - pattern-inside: |
+              $T $L = get_u16($P);
+              ...
+      - pattern-not-inside: |
+          if (<... $L ...>) $STMT;
+          ...
+      - pattern-not-inside: |
+          if (<... $L ...>) $STMT; else $ELSE;
+          ...
+      - pattern: ADVANCE($W, $R, <... $L ...>)
+
+  - id: copy-len-subtraction
+    languages: [c]
+    severity: INFO
+    message: >-
+      Copy length is a subtraction; if the subtrahend can exceed the
+      minuend (e.g. a header length larger than the packet) the unsigned
+      result wraps to a huge size.
+    pattern-either:
+      - pattern: memcpy($D, $S, $A - $B)
+      - pattern: memmove($D, $S, $A - $B)
+      - pattern: bmemcpy($D, $S, $A - $B)
+
+  # ── BIRD helpers ─────────────────────────────────────────────────────
+  - id: format-result-advance
+    languages: [c]
+    severity: WARNING
+    message: >-
+      bsnprintf()/bvsnprintf() return -1 on truncation. ADVANCE()-ing or
+      accumulating that result unchecked moves the cursor backwards and
+      grows the remaining length; check for < 0 first.
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $C = bsnprintf(...);
+              ...
+          - pattern-inside: |
+              $T $C = bsnprintf(...);
+              ...
+          - pattern-inside: |
+              $C = bvsnprintf(...);
+              ...
+          - pattern-inside: |
+              $T $C = bvsnprintf(...);
+              ...
+      - pattern-not-inside: |
+          if (<... $C ...>) $STMT;
+          ...
+      - pattern-not-inside: |
+          if (<... $C ...>) $STMT; else $ELSE;
+          ...
+      - pattern: ADVANCE($B, $N, $C)
+
+  - id: format-result-accumulate
+    languages: [c]
+    severity: WARNING
+    message: >-
+      bsnprintf() returns -1 on truncation; accumulating it into an offset
+      or pointer unchecked moves it backwards.
+    pattern-either:
+      - pattern: $N += bsnprintf(...)
+      - pattern: $N += bvsnprintf(...)
+
+  - id: bsprintf-unbounded
+    languages: [c]
+    severity: INFO
+    message: >-
+      bsprintf()/bvsprintf() have no bound (bvsnprintf with a 1e9 size);
+      make sure the buffer is sized for the worst case, or use bsnprintf().
+    pattern-either:
+      - pattern: bsprintf(...)
+      - pattern: bvsprintf(...)
+
+  - id: assert-side-effect
+    languages: [c]
+    severity: WARNING
+    message: >-
+      Side effect inside ASSERT()/assert(). BIRD's ASSERT() compiles to
+      nothing without --enable-debug, so the side effect disappears in
+      release builds; use ASSERT_DIE() or hoist it out.
+    pattern-either:
+      - pattern: ASSERT(<... $X++ ...>)
+      - pattern: ASSERT(<... $X-- ...>)
+      - pattern: ASSERT(<... ++$X ...>)
+      - pattern: ASSERT(<... --$X ...>)
+      - pattern: ASSERT(<... $X = $Y ...>)
+      - pattern: assert(<... $X++ ...>)
+      - pattern: assert(<... $X-- ...>)
+      - pattern: assert(<... $X = $Y ...>)
+
+  # ── Generic unsafe libc ──────────────────────────────────────────────
+  - id: unsafe-sprintf
+    languages: [c]
+    severity: WARNING
+    message: sprintf() has no bound; use bsnprintf()/snprintf().
+    pattern: sprintf(...)
+
+  - id: unsafe-strcpy-strcat
+    languages: [c]
+    severity: WARNING
+    message: strcpy()/strcat() have no bound; use strncpy() + termination or bsnprintf().
+    pattern-either:
+      - pattern: strcpy(...)
+      - pattern: strcat(...)
+
+  - id: strncpy-usage
+    languages: [c]
+    severity: INFO
+    message: strncpy() does not NUL-terminate on truncation.
+    pattern: strncpy(...)
+
+  - id: potential-format-string
+    languages: [c]
+    severity: WARNING
+    message: Non-literal format string passed to a printf-family function.
+    patterns:
+      - pattern-either:
+          - pattern: printf($FMT)
+          - pattern: fprintf($F, $FMT)
+          - pattern: syslog($P, $FMT)
+          - pattern: bsprintf($B, $FMT)
+          - pattern: bsnprintf($B, $N, $FMT)
+          - pattern: cli_msg($C, $FMT)
+      - pattern-not: printf("...")
+      - pattern-not: fprintf($F, "...")
+      - pattern-not: syslog($P, "...")
+      - pattern-not: bsprintf($B, "...")
+      - pattern-not: bsnprintf($B, $N, "...")
+      - pattern-not: cli_msg($C, "...")
+
+  - id: atoi-usage
+    languages: [c]
+    severity: INFO
+    message: atoi()/atol() have no error reporting; use strtol()/bstrtoul10().
+    pattern-either:
+      - pattern: atoi(...)
+      - pattern: atol(...)
+
+  - id: alloca-usage
+    languages: [c]
+    severity: INFO
+    message: alloca() with a runtime size can overflow the stack.
+    patterns:
+      - pattern: alloca($N)
+      - metavariable-pattern:
+          metavariable: $N
+          patterns:
+            - pattern-not: sizeof(...)
+            - pattern-not-regex: ^[0-9A-Z_]+$

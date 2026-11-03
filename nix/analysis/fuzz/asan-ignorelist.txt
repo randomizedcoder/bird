@@ -1,0 +1,8 @@
+# Compile-time ASan ignorelist for the fuzz build (fuzz.nix sanCflags).
+# Known, already-triaged out-of-bounds reads that would otherwise stop
+# fuzz_bgp_msg within seconds; ASan cannot suppress these at run time.
+# Remove an entry once the bug is fixed upstream.
+#
+# No entries: the ip6_getbits()/trie_node_format() reads past a.addr[3]
+# previously listed here are fixed in lib/ip.h and filter/trie.c.
+# Entries go under an [address] section, one `fun:<name>` per line.

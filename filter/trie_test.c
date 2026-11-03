@@ -687,9 +687,13 @@ t_trie_walk(void)
       if (net_equal(&from.net, &pxset[pos].net))
 	continue;
 
+      /* ipX_pxlen() requires distinct addresses; equal prefixes can still
+	 differ in length, e.g. 10.0.0.0/8 and 10.0.0.0/16 */
       int common = !v6 ?
-	ip4_pxlen(net4_prefix(&from.net), net4_prefix(&pxset[pos].net)) :
-	ip6_pxlen(net6_prefix(&from.net), net6_prefix(&pxset[pos].net));
+	(ip4_equal(net4_prefix(&from.net), net4_prefix(&pxset[pos].net)) ? IP4_MAX_PREFIX_LENGTH :
+	 ip4_pxlen(net4_prefix(&from.net), net4_prefix(&pxset[pos].net))) :
+	(ip6_equal(net6_prefix(&from.net), net6_prefix(&pxset[pos].net)) ? IP6_MAX_PREFIX_LENGTH :
+	 ip6_pxlen(net6_prefix(&from.net), net6_prefix(&pxset[pos].net)));
       from.net.pxlen = MIN(from.net.pxlen, common);
 
       if (!v6)
