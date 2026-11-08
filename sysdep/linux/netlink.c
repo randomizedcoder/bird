@@ -631,6 +631,10 @@ static inline u32 rta_get_u32(struct rtattr *a)
 static inline const char *rta_get_str(struct rtattr *a)
 { return RTA_DATA(a); }
 
+/* A string attribute must hold its NUL, padding does not count */
+static inline int rta_is_str(struct rtattr *a)
+{ return memchr(RTA_DATA(a), 0, RTA_PAYLOAD(a)) != NULL; }
+
 static inline ip4_addr rta_get_ip4(struct rtattr *a)
 { return ip4_ntoh(*(ip4_addr *) RTA_DATA(a)); }
 
@@ -1111,7 +1115,7 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
   if (!nl_parse_attrs(IFLA_RTA(i), ifla_attr_want, a, sizeof(a)))
     return;
-  if (!a[IFLA_IFNAME] || (RTA_PAYLOAD(a[IFLA_IFNAME]) < 2) || !a[IFLA_MTU])
+  if (!a[IFLA_IFNAME] || (RTA_PAYLOAD(a[IFLA_IFNAME]) < 2) || !rta_is_str(a[IFLA_IFNAME]) || !a[IFLA_MTU])
     {
       /*
        * IFLA_IFNAME and IFLA_MTU are required, in fact, but there may also come
@@ -1142,7 +1146,7 @@ nl_parse_link(struct nlmsghdr *h, int scan)
     nl_attr_len = RTA_PAYLOAD(a[IFLA_LINKINFO]);
     nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li));
 
-    if (li[IFLA_INFO_KIND])
+    if (li[IFLA_INFO_KIND] && rta_is_str(li[IFLA_INFO_KIND]))
       kind = RTA_DATA(li[IFLA_INFO_KIND]);
 
     if (!bstrcmp(kind, "bridge") && li[IFLA_INFO_DATA])
