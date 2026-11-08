@@ -1259,7 +1259,7 @@ nl_parse_addr4(struct ifaddrmsg *i, int scan, int new)
   if (i->ifa_prefixlen > IP4_MAX_PREFIX_LENGTH)
     {
       log(L_ERR "KIF: Invalid prefix length for interface %s: %d", ifi->name, i->ifa_prefixlen);
-      new = 0;
+      return;
     }
   if (i->ifa_prefixlen == IP4_MAX_PREFIX_LENGTH)
     {
@@ -1365,7 +1365,7 @@ nl_parse_addr6(struct ifaddrmsg *i, int scan, int new)
   if (i->ifa_prefixlen > IP6_MAX_PREFIX_LENGTH)
     {
       log(L_ERR "KIF: Invalid prefix length for interface %s: %d", ifi->name, i->ifa_prefixlen);
-      new = 0;
+      return;
     }
   if (i->ifa_prefixlen == IP6_MAX_PREFIX_LENGTH)
     {
