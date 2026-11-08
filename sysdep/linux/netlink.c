@@ -1098,7 +1098,18 @@ nl_parse_link(struct nlmsghdr *h, int scan)
   u32 mtu, master = 0;
   uint fl;
 
-  if (!(i = nl_checkin(h, sizeof(*i))) || !nl_parse_attrs(IFLA_RTA(i), ifla_attr_want, a, sizeof(a)))
+  if (!(i = nl_checkin(h, sizeof(*i))))
+    return;
+
+  /*
+   * The bridge sends AF_BRIDGE link messages about its ports and their VLANs
+   * to the link group too (RTM_DELLINK when a port leaves or its VLANs are
+   * deleted). They are not about the link itself, so leave them out.
+   */
+  if (i->ifi_family != AF_UNSPEC)
+    return;
+
+  if (!nl_parse_attrs(IFLA_RTA(i), ifla_attr_want, a, sizeof(a)))
     return;
   if (!a[IFLA_IFNAME] || (RTA_PAYLOAD(a[IFLA_IFNAME]) < 2) || !a[IFLA_MTU])
     {
