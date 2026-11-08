@@ -903,15 +903,16 @@ nl_parse_multipath(struct nl_parse_state *s, struct krt_proto *p, const net_addr
   struct rtattr *a[BIRD_RTA_MAX];
   struct rtnexthop *nh = RTA_DATA(ra);
   struct nexthop *rv, *first, **last;
-  unsigned len = RTA_PAYLOAD(ra);
+  int len = RTA_PAYLOAD(ra);
 
   first = NULL;
   last = &first;
 
-  while (len)
+  /* The last next hop may lack its padding, so len can end up negative */
+  while (len > 0)
     {
-      /* Use RTNH_OK(nh,len) ?? */
-      if ((len < sizeof(*nh)) || (len < nh->rtnh_len))
+      /* RTNH_OK() reads rtnh_len before checking len, so check it first */
+      if ((len < (int) sizeof(*nh)) || !RTNH_OK(nh, len))
 	goto err;
 
       if ((nh->rtnh_flags & RTNH_F_DEAD) && (krt_src != KRT_SRC_BIRD))
@@ -1004,7 +1005,7 @@ nl_parse_multipath(struct nl_parse_state *s, struct krt_proto *p, const net_addr
 #endif
 
     next:
-      len -= NLMSG_ALIGN(nh->rtnh_len);
+      len -= RTNH_ALIGN(nh->rtnh_len);
       nh = RTNH_NEXT(nh);
     }
 
