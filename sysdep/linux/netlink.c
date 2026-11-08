@@ -1144,7 +1144,7 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       if (data[IFLA_BR_VLAN_FILTERING])
       {
-	u8 vlan_filtering = rta_get_u32(data[IFLA_BR_VLAN_FILTERING]);
+	u8 vlan_filtering = rta_get_u8(data[IFLA_BR_VLAN_FILTERING]);
 	ea_set_attr_u32(&f.attrs->eattrs, tmp_linpool, EA_IFACE_BRIDGE_VLAN_FILTERING, 0, EAF_TYPE_INT, vlan_filtering);
       }
     }
