@@ -631,6 +631,10 @@ static inline u32 rta_get_u32(struct rtattr *a)
 static inline const char *rta_get_str(struct rtattr *a)
 { return RTA_DATA(a); }
 
+/* A string attribute must hold its NUL, padding does not count */
+static inline int rta_is_str(struct rtattr *a)
+{ return memchr(RTA_DATA(a), 0, RTA_PAYLOAD(a)) != NULL; }
+
 static inline ip4_addr rta_get_ip4(struct rtattr *a)
 { return ip4_ntoh(*(ip4_addr *) RTA_DATA(a)); }
 
@@ -652,10 +656,24 @@ static inline mac_addr rta_get_mac(struct rtattr *a)
 
 static inline ip_addr rta_get_via(struct rtattr *a)
 {
+  /* The address follows the 2 byte family, so it is not aligned */
   struct rtvia *v = RTA_DATA(a);
+  uint len = RTA_PAYLOAD(a);
+
+  if (len < sizeof(struct rtvia))
+    return IPA_NONE;
+
+  len -= sizeof(struct rtvia);
   switch(v->rtvia_family) {
-    case AF_INET:  return ipa_from_ip4(ip4_ntoh(*(ip4_addr *) v->rtvia_addr));
-    case AF_INET6: return ipa_from_ip6(ip6_ntoh(*(ip6_addr *) v->rtvia_addr));
+    case AF_INET:
+      if (len == sizeof(ip4_addr))
+	return ipa_from_ip4(get_ip4(v->rtvia_addr));
+      break;
+
+    case AF_INET6:
+      if (len == sizeof(ip6_addr))
+	return ipa_from_ip6(get_ip6(v->rtvia_addr));
+      break;
   }
   return IPA_NONE;
 }
@@ -889,15 +907,16 @@ nl_parse_multipath(struct nl_parse_state *s, struct krt_proto *p, const net_addr
   struct rtattr *a[BIRD_RTA_MAX];
   struct rtnexthop *nh = RTA_DATA(ra);
   struct nexthop *rv, *first, **last;
-  unsigned len = RTA_PAYLOAD(ra);
+  int len = RTA_PAYLOAD(ra);
 
   first = NULL;
   last = &first;
 
-  while (len)
+  /* The last next hop may lack its padding, so len can end up negative */
+  while (len > 0)
     {
-      /* Use RTNH_OK(nh,len) ?? */
-      if ((len < sizeof(*nh)) || (len < nh->rtnh_len))
+      /* RTNH_OK() reads rtnh_len before checking len, so check it first */
+      if ((len < (int) sizeof(*nh)) || !RTNH_OK(nh, len))
 	goto err;
 
       if ((nh->rtnh_flags & RTNH_F_DEAD) && (krt_src != KRT_SRC_BIRD))
@@ -984,13 +1003,15 @@ nl_parse_multipath(struct nl_parse_state *s, struct krt_proto *p, const net_addr
 
 	struct rtattr *enca[BIRD_RTA_MAX];
 	nl_attr_len = RTA_PAYLOAD(a[RTA_ENCAP]);
-	nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca));
+	if (!nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca)))
+	  goto err;
+
 	rv->labels = rta_get_mpls(enca[RTA_DST], rv->label);
       }
 #endif
 
     next:
-      len -= NLMSG_ALIGN(nh->rtnh_len);
+      len -= RTNH_ALIGN(nh->rtnh_len);
       nh = RTNH_NEXT(nh);
     }
 
@@ -1083,9 +1104,20 @@ nl_parse_link(struct nlmsghdr *h, int scan)
   u32 mtu, master = 0;
   uint fl;
 
-  if (!(i = nl_checkin(h, sizeof(*i))) || !nl_parse_attrs(IFLA_RTA(i), ifla_attr_want, a, sizeof(a)))
+  if (!(i = nl_checkin(h, sizeof(*i))))
     return;
-  if (!a[IFLA_IFNAME] || (RTA_PAYLOAD(a[IFLA_IFNAME]) < 2) || !a[IFLA_MTU])
+
+  /*
+   * The bridge sends AF_BRIDGE link messages about its ports and their VLANs
+   * to the link group too (RTM_DELLINK when a port leaves or its VLANs are
+   * deleted). They are not about the link itself, so leave them out.
+   */
+  if (i->ifi_family != AF_UNSPEC)
+    return;
+
+  if (!nl_parse_attrs(IFLA_RTA(i), ifla_attr_want, a, sizeof(a)))
+    return;
+  if (!a[IFLA_IFNAME] || (RTA_PAYLOAD(a[IFLA_IFNAME]) < 2) || !rta_is_str(a[IFLA_IFNAME]) || !a[IFLA_MTU])
     {
       /*
        * IFLA_IFNAME and IFLA_MTU are required, in fact, but there may also come
@@ -1114,9 +1146,10 @@ nl_parse_link(struct nlmsghdr *h, int scan)
   {
     struct rtattr *li[BIRD_INFO_MAX];
     nl_attr_len = RTA_PAYLOAD(a[IFLA_LINKINFO]);
-    nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li));
+    if (!nl_parse_attrs(RTA_DATA(a[IFLA_LINKINFO]), ifinfo_attr_want, li, sizeof(li)))
+      goto malformed;
 
-    if (li[IFLA_INFO_KIND])
+    if (li[IFLA_INFO_KIND] && rta_is_str(li[IFLA_INFO_KIND]))
       kind = RTA_DATA(li[IFLA_INFO_KIND]);
 
     if (!bstrcmp(kind, "bridge") && li[IFLA_INFO_DATA])
@@ -1125,11 +1158,12 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       struct rtattr *data[BIRD_IFLA_BR_MAX];
       nl_attr_len = RTA_PAYLOAD(li[IFLA_INFO_DATA]);
-      nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_br_attr_want, data, sizeof(data));
+      if (!nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_br_attr_want, data, sizeof(data)))
+	goto malformed;
 
       if (data[IFLA_BR_VLAN_FILTERING])
       {
-	u8 vlan_filtering = rta_get_u32(data[IFLA_BR_VLAN_FILTERING]);
+	u8 vlan_filtering = rta_get_u8(data[IFLA_BR_VLAN_FILTERING]);
 	ea_set_attr_u32(&f.attrs->eattrs, tmp_linpool, EA_IFACE_BRIDGE_VLAN_FILTERING, 0, EAF_TYPE_INT, vlan_filtering);
       }
     }
@@ -1139,7 +1173,8 @@ nl_parse_link(struct nlmsghdr *h, int scan)
 
       struct rtattr *data[BIRD_IFLA_VXLAN_MAX];
       nl_attr_len = RTA_PAYLOAD(li[IFLA_INFO_DATA]);
-      nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_vxlan_attr_want, data, sizeof(data));
+      if (!nl_parse_attrs(RTA_DATA(li[IFLA_INFO_DATA]), ifla_vxlan_attr_want, data, sizeof(data)))
+	goto malformed;
 
       if (data[IFLA_VXLAN_ID])
       {
@@ -1212,6 +1247,11 @@ nl_parse_link(struct nlmsghdr *h, int scan)
       if (!scan)
 	if_end_partial_update(ifi);
     }
+
+  return;
+
+malformed:
+  log(L_ERR "KIF: Malformed message received");
 }
 
 static void
@@ -1259,7 +1299,7 @@ nl_parse_addr4(struct ifaddrmsg *i, int scan, int new)
   if (i->ifa_prefixlen > IP4_MAX_PREFIX_LENGTH)
     {
       log(L_ERR "KIF: Invalid prefix length for interface %s: %d", ifi->name, i->ifa_prefixlen);
-      new = 0;
+      return;
     }
   if (i->ifa_prefixlen == IP4_MAX_PREFIX_LENGTH)
     {
@@ -1365,7 +1405,7 @@ nl_parse_addr6(struct ifaddrmsg *i, int scan, int new)
   if (i->ifa_prefixlen > IP6_MAX_PREFIX_LENGTH)
     {
       log(L_ERR "KIF: Invalid prefix length for interface %s: %d", ifi->name, i->ifa_prefixlen);
-      new = 0;
+      return;
     }
   if (i->ifa_prefixlen == IP6_MAX_PREFIX_LENGTH)
     {
@@ -2011,7 +2051,12 @@ nl_parse_route(struct nl_parse_state *s, struct nlmsghdr *h)
 	    {
 	      struct rtattr *enca[BIRD_RTA_MAX];
 	      nl_attr_len = RTA_PAYLOAD(a[RTA_ENCAP]);
-	      nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca));
+	      if (!nl_parse_attrs(RTA_DATA(a[RTA_ENCAP]), encap_mpls_want, enca, sizeof(enca)))
+	      {
+		log(L_ERR "KRT: Received route %N with malformed encapsulation", net->n.addr);
+		return;
+	      }
+
 	      ra->nh.labels = rta_get_mpls(enca[RTA_DST], ra->nh.label);
 	      break;
 	    }
@@ -2523,6 +2568,10 @@ nl_parse_vlan(struct nl_parse_state *s, struct nlmsghdr *h)
     return;
 
   u32 bridge_id = rta_get_u32(a[IFLA_MASTER]);
+
+  /* The bridge's own entry; BIRD manages only its ports' VLANs */
+  if ((u32) i->ifi_index == bridge_id)
+    return;
 
   /* Should be filtered by kernel */
   if (s->bridge_id && (bridge_id != s->bridge_id))
