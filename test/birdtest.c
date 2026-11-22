@@ -28,6 +28,20 @@
 
 #define BACKTRACE_MAX_LINES 100
 
+/*
+ * UBSan only prints a report and lets the program go on by default, so
+ * undefined behaviour would not fail a test. Built with --enable-ubsan,
+ * stop at the first report (UBSAN_OPTIONS can still override this).
+ * Without UBSan, nothing calls this.
+ */
+const char *__ubsan_default_options(void);
+
+const char *
+__ubsan_default_options(void)
+{
+  return "halt_on_error=1:print_stacktrace=1";
+}
+
 #define sprintf_concat(s, format, ...) \
     snprintf(s + strlen(s), sizeof(s) - strlen(s), format, ##__VA_ARGS__)
 
@@ -374,8 +388,9 @@ bt_test_suite_base(int (*fn)(const void *), const char *id, const void *fn_arg, 
 
     if (pid == 0)
     {
-      /* child of fork */
-      _exit(bt_run_test_fn(fn, fn_arg, timeout));
+      /* child of fork; exit 0 only on success, as any other status may
+       * come from exit() elsewhere, e.g. a sanitizer reporting an error */
+      _exit(bt_run_test_fn(fn, fn_arg, timeout) ? 0 : 1);
     }
 
     int s;
@@ -385,7 +400,7 @@ bt_test_suite_base(int (*fn)(const void *), const char *id, const void *fn_arg, 
     if (WIFEXITED(s))
     {
       /* Normal exit */
-      bt_suite_result = WEXITSTATUS(s);
+      bt_suite_result = (WEXITSTATUS(s) == 0);
     }
     else if (WIFSIGNALED(s))
     {
